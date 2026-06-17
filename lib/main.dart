@@ -1,15 +1,25 @@
 import 'dart:async';
 
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'data/poom_database.dart';
+import 'data/poom_repository_factory.dart';
 
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  final repositoryBundle = await createPoomRepositoryBundle();
+  _poomRepository = repositoryBundle.repository;
+  _poomUsesFirebase = repositoryBundle.usesFirebase;
+  _poomRepositoryMessage = repositoryBundle.message;
   runApp(const PoomApp());
 }
 
-final _poomRepository = PoomRepository(PoomDatabase.seeded());
+PoomRepositoryApi _poomRepository = PoomRepository(PoomDatabase.seeded());
+bool _poomUsesFirebase = false;
+String _poomRepositoryMessage = '임시 데이터베이스로 실행 중입니다.';
 
 const _brand = Color(0xFF256D5D);
 const _brandDark = Color(0xFF1F4F44);
@@ -40,6 +50,20 @@ enum FeedSort {
   final String label;
 }
 
+class HomeFilterDraft {
+  const HomeFilterDraft({
+    required this.showRequests,
+    required this.region,
+    required this.sort,
+    required this.query,
+  });
+
+  final bool showRequests;
+  final String region;
+  final FeedSort sort;
+  final String query;
+}
+
 enum RegistrationMode {
   request('도움 요청'),
   caregiver('보호 가능');
@@ -49,6 +73,70 @@ enum RegistrationMode {
   final String label;
 }
 
+enum AppThemePreference {
+  light('라이트 모드', 'Light mode'),
+  dark('다크 모드', 'Dark mode');
+
+  const AppThemePreference(this.koLabel, this.enLabel);
+
+  final String koLabel;
+  final String enLabel;
+
+  ThemeMode get themeMode {
+    switch (this) {
+      case AppThemePreference.light:
+        return ThemeMode.light;
+      case AppThemePreference.dark:
+        return ThemeMode.dark;
+    }
+  }
+
+  String label(AppLanguagePreference language) {
+    return language == AppLanguagePreference.ko ? koLabel : enLabel;
+  }
+}
+
+enum AppLanguagePreference {
+  ko('한국어', 'Korean'),
+  en('영어', 'English');
+
+  const AppLanguagePreference(this.koLabel, this.enLabel);
+
+  final String koLabel;
+  final String enLabel;
+
+  String label(AppLanguagePreference language) {
+    return language == AppLanguagePreference.ko ? koLabel : enLabel;
+  }
+}
+
+class AppPreferences {
+  const AppPreferences({
+    required this.theme,
+    required this.language,
+  });
+
+  final AppThemePreference theme;
+  final AppLanguagePreference language;
+
+  AppPreferences copyWith({
+    AppThemePreference? theme,
+    AppLanguagePreference? language,
+  }) {
+    return AppPreferences(
+      theme: theme ?? this.theme,
+      language: language ?? this.language,
+    );
+  }
+}
+
+final _appPreferences = ValueNotifier<AppPreferences>(
+  const AppPreferences(
+    theme: AppThemePreference.light,
+    language: AppLanguagePreference.ko,
+  ),
+);
+
 class LocalAppStore {
   static const _roleKey = 'poom.role';
   static const _matchNotiKey = 'poom.matchNotifications';
@@ -56,6 +144,10 @@ class LocalAppStore {
   static const _favoritesKey = 'poom.favoriteIds';
   static const _requestDraftKey = 'poom.requestDraft';
   static const _caregiverDraftKey = 'poom.caregiverDraft';
+  static const _handoffMemoKey = 'poom.handoffMemo';
+  static const _homeFilterKey = 'poom.homeFilter';
+  static const _themeKey = 'poom.theme';
+  static const _languageKey = 'poom.language';
 
   static Future<AppRole> readRole() async {
     final prefs = await SharedPreferences.getInstance();
@@ -97,6 +189,35 @@ class LocalAppStore {
     return saveBool(_chatNotiKey, value);
   }
 
+  static Future<AppPreferences> readAppPreferences() async {
+    final prefs = await SharedPreferences.getInstance();
+    final themeValue = prefs.getString(_themeKey);
+    final languageValue = prefs.getString(_languageKey);
+
+    return AppPreferences(
+      theme: AppThemePreference.values.firstWhere(
+        (theme) => theme.name == themeValue,
+        orElse: () => AppThemePreference.light,
+      ),
+      language: AppLanguagePreference.values.firstWhere(
+        (language) => language.name == languageValue,
+        orElse: () => AppLanguagePreference.ko,
+      ),
+    );
+  }
+
+  static Future<void> saveThemePreference(AppThemePreference theme) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_themeKey, theme.name);
+  }
+
+  static Future<void> saveLanguagePreference(
+    AppLanguagePreference language,
+  ) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_languageKey, language.name);
+  }
+
   static Future<Set<String>> readFavorites() async {
     final prefs = await SharedPreferences.getInstance();
     return (prefs.getStringList(_favoritesKey) ?? const <String>[]).toSet();
@@ -105,6 +226,39 @@ class LocalAppStore {
   static Future<void> saveFavorites(Set<String> ids) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setStringList(_favoritesKey, ids.toList()..sort());
+  }
+
+  static Future<HomeFilterDraft?> readHomeFilter() async {
+    final prefs = await SharedPreferences.getInstance();
+    final values = prefs.getStringList(_homeFilterKey);
+    if (values == null || values.length != 4) return null;
+
+    final sort = FeedSort.values.firstWhere(
+      (value) => value.name == values[2],
+      orElse: () => FeedSort.recommended,
+    );
+
+    return HomeFilterDraft(
+      showRequests: values[0] == 'request',
+      region: values[1].isEmpty ? '전체' : values[1],
+      sort: sort,
+      query: values[3],
+    );
+  }
+
+  static Future<void> saveHomeFilter(HomeFilterDraft filter) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList(_homeFilterKey, [
+      filter.showRequests ? 'request' : 'caregiver',
+      filter.region,
+      filter.sort.name,
+      filter.query,
+    ]);
+  }
+
+  static Future<void> clearHomeFilter() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_homeFilterKey);
   }
 
   static Future<List<String>?> readRequestDraft() async {
@@ -118,6 +272,11 @@ class LocalAppStore {
     await prefs.setStringList(_requestDraftKey, values);
   }
 
+  static Future<void> clearRequestDraft() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_requestDraftKey);
+  }
+
   static Future<List<String>?> readCaregiverDraft() async {
     final prefs = await SharedPreferences.getInstance();
     final values = prefs.getStringList(_caregiverDraftKey);
@@ -128,51 +287,162 @@ class LocalAppStore {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setStringList(_caregiverDraftKey, values);
   }
+
+  static Future<void> clearCaregiverDraft() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_caregiverDraftKey);
+  }
+
+  static Future<String> readHandoffMemo() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(_handoffMemoKey) ?? '';
+  }
+
+  static Future<void> saveHandoffMemo(String value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_handoffMemoKey, value);
+  }
 }
 
-class PoomApp extends StatelessWidget {
+class PoomApp extends StatefulWidget {
   const PoomApp({super.key});
 
   @override
+  State<PoomApp> createState() => _PoomAppState();
+}
+
+class _PoomAppState extends State<PoomApp> {
+  @override
+  void initState() {
+    super.initState();
+    _loadPreferences();
+  }
+
+  Future<void> _loadPreferences() async {
+    final preferences = await LocalAppStore.readAppPreferences();
+    if (!mounted) return;
+    _appPreferences.value = preferences;
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      debugShowCheckedModeBanner: false,
-      title: '품',
-      theme: ThemeData(
-        useMaterial3: true,
-        scaffoldBackgroundColor: _bg,
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: _brand,
-          surface: _bg,
-        ),
-        fontFamily: 'Roboto',
-        textTheme: const TextTheme(
-          headlineSmall: TextStyle(
-            color: _ink,
-            fontSize: 28,
-            fontWeight: FontWeight.w900,
-            height: 1.18,
-          ),
-          titleLarge: TextStyle(
-            color: _ink,
-            fontSize: 21,
-            fontWeight: FontWeight.w900,
-          ),
-          titleMedium: TextStyle(
-            color: _ink,
-            fontSize: 17,
-            fontWeight: FontWeight.w900,
-          ),
-          bodyMedium: TextStyle(
-            color: _ink,
-            fontSize: 15,
-            height: 1.45,
-          ),
-        ),
-      ),
-      home: const IntroGate(),
+    return ValueListenableBuilder<AppPreferences>(
+      valueListenable: _appPreferences,
+      builder: (context, preferences, _) {
+        return MaterialApp(
+          debugShowCheckedModeBanner: false,
+          title:
+              preferences.language == AppLanguagePreference.ko ? '품' : 'Poom',
+          themeMode: preferences.theme.themeMode,
+          theme: _buildLightTheme(),
+          darkTheme: _buildDarkTheme(),
+          home: const IntroGate(),
+        );
+      },
     );
   }
+
+  ThemeData _buildLightTheme() {
+    return ThemeData(
+      useMaterial3: true,
+      brightness: Brightness.light,
+      scaffoldBackgroundColor: _bg,
+      colorScheme: ColorScheme.fromSeed(
+        seedColor: _brand,
+        brightness: Brightness.light,
+        surface: _bg,
+      ),
+      textTheme: const TextTheme(
+        headlineSmall: TextStyle(
+          color: _ink,
+          fontSize: 28,
+          fontWeight: FontWeight.w900,
+          height: 1.18,
+        ),
+        titleLarge: TextStyle(
+          color: _ink,
+          fontSize: 21,
+          fontWeight: FontWeight.w900,
+        ),
+        titleMedium: TextStyle(
+          color: _ink,
+          fontSize: 17,
+          fontWeight: FontWeight.w900,
+        ),
+        bodyMedium: TextStyle(
+          color: _ink,
+          fontSize: 15,
+          height: 1.45,
+        ),
+      ),
+    );
+  }
+
+  ThemeData _buildDarkTheme() {
+    const darkBg = Color(0xFF111815);
+    const darkSurface = Color(0xFF1B2420);
+    const darkInk = Color(0xFFE8F0EB);
+
+    return ThemeData(
+      useMaterial3: true,
+      brightness: Brightness.dark,
+      scaffoldBackgroundColor: darkBg,
+      colorScheme: ColorScheme.fromSeed(
+        seedColor: _brand,
+        brightness: Brightness.dark,
+        surface: darkSurface,
+      ),
+      appBarTheme: const AppBarTheme(
+        backgroundColor: darkSurface,
+        foregroundColor: darkInk,
+        surfaceTintColor: darkSurface,
+      ),
+      bottomNavigationBarTheme: const BottomNavigationBarThemeData(
+        backgroundColor: darkSurface,
+        selectedItemColor: _softGreen,
+        unselectedItemColor: Color(0xFF93A29B),
+      ),
+      textTheme: const TextTheme(
+        headlineSmall: TextStyle(
+          color: darkInk,
+          fontSize: 28,
+          fontWeight: FontWeight.w900,
+          height: 1.18,
+        ),
+        titleLarge: TextStyle(
+          color: darkInk,
+          fontSize: 21,
+          fontWeight: FontWeight.w900,
+        ),
+        titleMedium: TextStyle(
+          color: darkInk,
+          fontSize: 17,
+          fontWeight: FontWeight.w900,
+        ),
+        bodyMedium: TextStyle(
+          color: darkInk,
+          fontSize: 15,
+          height: 1.45,
+        ),
+      ),
+      cardTheme: CardThemeData(
+        color: darkSurface,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(18),
+        ),
+      ),
+    );
+  }
+}
+
+Future<void> _updateThemePreference(AppThemePreference theme) async {
+  _appPreferences.value = _appPreferences.value.copyWith(theme: theme);
+  await LocalAppStore.saveThemePreference(theme);
+}
+
+Future<void> _updateLanguagePreference(AppLanguagePreference language) async {
+  _appPreferences.value = _appPreferences.value.copyWith(language: language);
+  await LocalAppStore.saveLanguagePreference(language);
 }
 
 class IntroGate extends StatefulWidget {
@@ -199,7 +469,235 @@ class _IntroGateState extends State<IntroGate> {
   Widget build(BuildContext context) {
     return AnimatedSwitcher(
       duration: const Duration(milliseconds: 420),
-      child: _showIntro ? const IntroScreen() : const ShellScreen(),
+      child: _showIntro ? const IntroScreen() : const AuthGate(),
+    );
+  }
+}
+
+class AuthGate extends StatefulWidget {
+  const AuthGate({super.key});
+
+  @override
+  State<AuthGate> createState() => _AuthGateState();
+}
+
+class _AuthGateState extends State<AuthGate> {
+  bool _demoAccess = false;
+
+  @override
+  Widget build(BuildContext context) {
+    if (_demoAccess) {
+      return const ShellScreen();
+    }
+
+    if (!_poomUsesFirebase) {
+      return AuthPage(
+        authEnabled: false,
+        onContinueAsDemo: () => setState(() => _demoAccess = true),
+      );
+    }
+
+    return StreamBuilder<User?>(
+      stream: FirebaseAuth.instance.authStateChanges(),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Scaffold(
+            body: Center(child: CircularProgressIndicator(color: _brand)),
+          );
+        }
+
+        if (snapshot.data != null) {
+          return const ShellScreen();
+        }
+
+        return AuthPage(
+          authEnabled: true,
+          onContinueAsDemo: () => setState(() => _demoAccess = true),
+        );
+      },
+    );
+  }
+}
+
+class AuthPage extends StatefulWidget {
+  const AuthPage({
+    required this.authEnabled,
+    required this.onContinueAsDemo,
+    super.key,
+  });
+
+  final bool authEnabled;
+  final VoidCallback onContinueAsDemo;
+
+  @override
+  State<AuthPage> createState() => _AuthPageState();
+}
+
+class _AuthPageState extends State<AuthPage> {
+  bool _loading = false;
+
+  Future<void> _signInWithProvider(AuthProvider provider) async {
+    setState(() => _loading = true);
+    try {
+      if (kIsWeb) {
+        await FirebaseAuth.instance.signInWithPopup(provider);
+      } else {
+        await FirebaseAuth.instance.signInWithProvider(provider);
+      }
+    } on FirebaseAuthException catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(_authErrorMessage(error))),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _loading = false);
+      }
+    }
+  }
+
+  String _authErrorMessage(FirebaseAuthException error) {
+    switch (error.code) {
+      case 'popup-closed-by-user':
+      case 'web-context-cancelled':
+      case 'cancelled-popup-request':
+        return '로그인이 취소됐어요.';
+      case 'account-exists-with-different-credential':
+        return '이미 다른 로그인 방식으로 가입된 계정입니다.';
+      case 'operation-not-allowed':
+        return 'Firebase Console에서 해당 로그인 제공자를 활성화해 주세요.';
+      default:
+        return '로그인 중 문제가 생겼어요. (${error.code})';
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final authCopy = widget.authEnabled
+        ? '처음이면 회원가입, 기존이면 로그인으로 이어집니다.'
+        : 'Firebase 설정을 넣으면 OAuth 로그인을 사용할 수 있습니다.';
+
+    return Scaffold(
+      body: ResponsivePage(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(20, 28, 20, 28),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 480),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Center(
+                      child: BrandMark(size: 72, radius: 20, fontSize: 30)),
+                  const SizedBox(height: 24),
+                  const Text(
+                    '품 시작하기',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: _ink,
+                      fontSize: 28,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    authCopy,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      color: _muted,
+                      fontSize: 15,
+                      height: 1.4,
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+                  AppCard(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        OAuthButton(
+                          icon: Icons.g_mobiledata,
+                          label: 'Google로 계속하기',
+                          onPressed: _loading || !widget.authEnabled
+                              ? null
+                              : () => _signInWithProvider(GoogleAuthProvider()),
+                        ),
+                        const SizedBox(height: 10),
+                        OAuthButton(
+                          icon: Icons.apple,
+                          label: 'Apple로 계속하기',
+                          onPressed: _loading || !widget.authEnabled
+                              ? null
+                              : () => _signInWithProvider(
+                                    OAuthProvider('apple.com'),
+                                  ),
+                        ),
+                        if (_loading) ...[
+                          const SizedBox(height: 16),
+                          const LinearProgressIndicator(
+                            color: _brand,
+                            backgroundColor: _softGreen,
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                  if (!widget.authEnabled) ...[
+                    const SizedBox(height: 12),
+                    NoticeBox(
+                      title: 'OAuth 설정 대기 중',
+                      copy: _poomRepositoryMessage,
+                    ),
+                  ],
+                  const SizedBox(height: 12),
+                  TextButton(
+                    onPressed: _loading ? null : widget.onContinueAsDemo,
+                    style: TextButton.styleFrom(foregroundColor: _brand),
+                    child: const Text(
+                      '지금은 둘러보기',
+                      style: TextStyle(fontWeight: FontWeight.w900),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  const Text(
+                    '로그인 후 도움 요청, 보호 가능 등록, 매칭, 채팅 기록을 안전하게 계정과 연결할 수 있습니다.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: _muted, fontSize: 13, height: 1.45),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class OAuthButton extends StatelessWidget {
+  const OAuthButton({
+    required this.icon,
+    required this.label,
+    required this.onPressed,
+    super.key,
+  });
+
+  final IconData icon;
+  final String label;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return OutlinedButton.icon(
+      onPressed: onPressed,
+      icon: Icon(icon, size: 24),
+      label: Text(label),
+      style: OutlinedButton.styleFrom(
+        foregroundColor: _ink,
+        side: const BorderSide(color: _line),
+        minimumSize: const Size.fromHeight(54),
+        textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.w900),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      ),
     );
   }
 }
@@ -317,11 +815,13 @@ class ShellScreen extends StatefulWidget {
 
 class _ShellScreenState extends State<ShellScreen> {
   int _index = 0;
+  int _homeRefreshVersion = 0;
   bool _requesterConfirmed = true;
   bool _caregiverConfirmed = false;
   bool _matchNotifications = true;
   bool _chatNotifications = true;
   AppRole _role = AppRole.requester;
+  RegistrationMode _homePreferredMode = RegistrationMode.request;
 
   bool get _chatOpen => _requesterConfirmed && _caregiverConfirmed;
 
@@ -347,10 +847,20 @@ class _ShellScreenState extends State<ShellScreen> {
   Widget build(BuildContext context) {
     final pages = [
       HomePage(
+        refreshVersion: _homeRefreshVersion,
+        preferredMode: _homePreferredMode,
         onOpenRegistration: () => setState(() => _index = 1),
         onOpenMatch: () => setState(() => _index = 2),
       ),
-      const RequestPage(),
+      RequestPage(
+        onRegistered: (mode) {
+          setState(() {
+            _homePreferredMode = mode;
+            _homeRefreshVersion++;
+            _index = 0;
+          });
+        },
+      ),
       MatchPage(
         requesterConfirmed: _requesterConfirmed,
         caregiverConfirmed: _caregiverConfirmed,
@@ -403,11 +913,12 @@ class _ShellScreenState extends State<ShellScreen> {
             icon: const Icon(Icons.notifications_none, color: _brand),
           ),
           IconButton(
-            tooltip: '역할과 알림 설정',
+            tooltip: '내 품',
             onPressed: () {
               Navigator.of(context).push(
                 MaterialPageRoute<void>(
-                  builder: (_) => SettingsPage(
+                  builder: (_) => MyPoomPage(
+                    chatOpen: _chatOpen,
                     role: _role,
                     matchNotifications: _matchNotifications,
                     chatNotifications: _chatNotifications,
@@ -470,11 +981,15 @@ class _ShellScreenState extends State<ShellScreen> {
 
 class HomePage extends StatefulWidget {
   const HomePage({
+    required this.refreshVersion,
+    required this.preferredMode,
     required this.onOpenRegistration,
     required this.onOpenMatch,
     super.key,
   });
 
+  final int refreshVersion;
+  final RegistrationMode preferredMode;
   final VoidCallback onOpenRegistration;
   final VoidCallback onOpenMatch;
 
@@ -488,13 +1003,104 @@ class _HomePageState extends State<HomePage> {
   String _region = '전체';
   FeedSort _sort = FeedSort.recommended;
   final Set<String> _favoriteIds = <String>{};
-  late final Future<HomeFeed> _feedFuture;
+  final _searchController = TextEditingController();
+  late Future<HomeFeed> _feedFuture;
+  DateTime _lastUpdated = DateTime.now();
 
   @override
   void initState() {
     super.initState();
+    _showRequests = widget.preferredMode == RegistrationMode.request;
     _feedFuture = _poomRepository.fetchHomeFeed();
+    _loadHomeFilter();
     _loadFavorites();
+  }
+
+  @override
+  void didUpdateWidget(covariant HomePage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.refreshVersion != widget.refreshVersion) {
+      _showRequests = widget.preferredMode == RegistrationMode.request;
+      _reloadFeed();
+    }
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadHomeFilter() async {
+    final filter = await LocalAppStore.readHomeFilter();
+    if (!mounted || filter == null) return;
+    setState(() {
+      _showRequests = filter.showRequests;
+      _region = filter.region;
+      _sort = filter.sort;
+      _query = filter.query;
+      _searchController.text = filter.query;
+    });
+  }
+
+  void _saveHomeFilter() {
+    LocalAppStore.saveHomeFilter(
+      HomeFilterDraft(
+        showRequests: _showRequests,
+        region: _region,
+        sort: _sort,
+        query: _query,
+      ),
+    );
+  }
+
+  void _setQuery(String value) {
+    setState(() => _query = value);
+    _saveHomeFilter();
+  }
+
+  void _setRegion(String value) {
+    setState(() => _region = value);
+    _saveHomeFilter();
+  }
+
+  void _setSort(FeedSort value) {
+    setState(() => _sort = value);
+    _saveHomeFilter();
+  }
+
+  void _setFeedMode(bool showRequests) {
+    setState(() => _showRequests = showRequests);
+    _saveHomeFilter();
+  }
+
+  Future<void> _resetHomeFilter() async {
+    await LocalAppStore.clearHomeFilter();
+    if (!mounted) return;
+    setState(() {
+      _showRequests = widget.preferredMode == RegistrationMode.request;
+      _query = '';
+      _region = '전체';
+      _sort = FeedSort.recommended;
+      _searchController.clear();
+    });
+  }
+
+  void _reloadFeed() {
+    setState(() {
+      _feedFuture = _poomRepository.fetchHomeFeed();
+      _lastUpdated = DateTime.now();
+    });
+    _loadFavorites();
+  }
+
+  Future<void> _refreshFeed() async {
+    setState(() {
+      _feedFuture = _poomRepository.fetchHomeFeed();
+      _lastUpdated = DateTime.now();
+    });
+    await _feedFuture;
+    await _loadFavorites();
   }
 
   Future<void> _loadFavorites() async {
@@ -509,83 +1115,104 @@ class _HomePageState extends State<HomePage> {
 
   @override
   Widget build(BuildContext context) {
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(20, 18, 20, 28),
-      children: [
-        Text(
-          '오늘 필요한 연결',
-          style: Theme.of(context).textTheme.headlineSmall,
-        ),
-        const SizedBox(height: 8),
-        const Text(
-          '사정이 생긴 보호자와 도움을 줄 수 있는 사람이 서로 확인한 뒤 대화를 시작합니다.',
-          style: TextStyle(color: _muted, fontSize: 16),
-        ),
-        const SizedBox(height: 18),
-        FilledButton(
-          onPressed: widget.onOpenRegistration,
-          style: FilledButton.styleFrom(
-            backgroundColor: _brand,
-            foregroundColor: Colors.white,
-            minimumSize: const Size.fromHeight(54),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(16),
+    return RefreshIndicator(
+      color: _brand,
+      onRefresh: _refreshFeed,
+      child: ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.fromLTRB(20, 18, 20, 28),
+        children: [
+          Text(
+            '오늘 필요한 연결',
+            style: Theme.of(context).textTheme.headlineSmall,
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            '사정이 생긴 보호자와 도움을 줄 수 있는 사람이 서로 확인한 뒤 대화를 시작합니다.',
+            style: TextStyle(color: _muted, fontSize: 16),
+          ),
+          const SizedBox(height: 18),
+          FilledButton(
+            onPressed: widget.onOpenRegistration,
+            style: FilledButton.styleFrom(
+              backgroundColor: _brand,
+              foregroundColor: Colors.white,
+              minimumSize: const Size.fromHeight(54),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+              ),
+            ),
+            child: const Text(
+              '도움 요청 또는 보호 가능 등록',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w900),
             ),
           ),
-          child: const Text(
-            '도움 요청 또는 보호 가능 등록',
-            style: TextStyle(fontSize: 16, fontWeight: FontWeight.w900),
+          const SizedBox(height: 18),
+          FutureBuilder<HomeFeed>(
+            future: _feedFuture,
+            builder: (context, snapshot) {
+              if (!snapshot.hasData) {
+                return const FeedLoadingState();
+              }
+
+              final feed = snapshot.data!;
+              final visibleCount = _showRequests
+                  ? _filterRequests(feed.requests).length
+                  : _filterCaregivers(feed.caregivers).length;
+              final totalCount =
+                  _showRequests ? feed.requests.length : feed.caregivers.length;
+
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  QuickStatusStrip(stats: feed.stats),
+                  const SizedBox(height: 14),
+                  const SafetyOverviewCard(),
+                  const SizedBox(height: 20),
+                  FeedSearchBar(
+                    controller: _searchController,
+                    onChanged: _setQuery,
+                  ),
+                  const SizedBox(height: 10),
+                  RegionFilterBar(
+                    selected: _region,
+                    onChanged: _setRegion,
+                  ),
+                  const SizedBox(height: 10),
+                  FeedSortBar(
+                    selected: _sort,
+                    onChanged: _setSort,
+                  ),
+                  const SizedBox(height: 18),
+                  FeedToggle(
+                    showRequests: _showRequests,
+                    onChanged: _setFeedMode,
+                  ),
+                  const SizedBox(height: 12),
+                  FeedInsightCard(
+                    visibleCount: visibleCount,
+                    totalCount: totalCount,
+                    showRequests: _showRequests,
+                    region: _region,
+                    query: _query,
+                    lastUpdated: _lastUpdated,
+                    onReset: _resetHomeFilter,
+                  ),
+                  const SizedBox(height: 16),
+                  SectionHeader(
+                    title: _showRequests ? '도움이 필요한 요청' : '보호 가능자',
+                    action: _showRequests ? '가까운 순' : '적합도 순',
+                  ),
+                  if (_showRequests)
+                    ..._buildRequestResults(context, feed.requests)
+                  else
+                    ..._buildCaregiverResults(context, feed.caregivers),
+                ],
+              );
+            },
           ),
-        ),
-        const SizedBox(height: 18),
-        FutureBuilder<HomeFeed>(
-          future: _feedFuture,
-          builder: (context, snapshot) {
-            if (!snapshot.hasData) {
-              return const FeedLoadingState();
-            }
-
-            final feed = snapshot.data!;
-
-            return Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                QuickStatusStrip(stats: feed.stats),
-                const SizedBox(height: 14),
-                const SafetyOverviewCard(),
-                const SizedBox(height: 20),
-                FeedSearchBar(
-                  onChanged: (value) => setState(() => _query = value),
-                ),
-                const SizedBox(height: 10),
-                RegionFilterBar(
-                  selected: _region,
-                  onChanged: (value) => setState(() => _region = value),
-                ),
-                const SizedBox(height: 10),
-                FeedSortBar(
-                  selected: _sort,
-                  onChanged: (value) => setState(() => _sort = value),
-                ),
-                const SizedBox(height: 18),
-                FeedToggle(
-                  showRequests: _showRequests,
-                  onChanged: (value) => setState(() => _showRequests = value),
-                ),
-                const SizedBox(height: 16),
-                SectionHeader(
-                  title: _showRequests ? '도움이 필요한 요청' : '보호 가능자',
-                  action: _showRequests ? '가까운 순' : '적합도 순',
-                ),
-                if (_showRequests)
-                  ..._buildRequestResults(context, feed.requests)
-                else
-                  ..._buildCaregiverResults(context, feed.caregivers),
-              ],
-            );
-          },
-        ),
-      ],
+        ],
+      ),
     );
   }
 
@@ -856,6 +1483,7 @@ class _HomePageState extends State<HomePage> {
       ),
     );
     _showSnack('1대1 매칭 검토가 생성됐어요.');
+    _reloadFeed();
     widget.onOpenMatch();
   }
 
@@ -894,13 +1522,19 @@ class FeedLoadingState extends StatelessWidget {
 }
 
 class FeedSearchBar extends StatelessWidget {
-  const FeedSearchBar({required this.onChanged, super.key});
+  const FeedSearchBar({
+    required this.onChanged,
+    this.controller,
+    super.key,
+  });
 
+  final TextEditingController? controller;
   final ValueChanged<String> onChanged;
 
   @override
   Widget build(BuildContext context) {
     return TextField(
+      controller: controller,
       onChanged: onChanged,
       decoration: InputDecoration(
         hintText: '지역, 조건, 키워드 검색',
@@ -1132,31 +1766,136 @@ class FeedToggleButton extends StatelessWidget {
   }
 }
 
+class FeedInsightCard extends StatelessWidget {
+  const FeedInsightCard({
+    required this.visibleCount,
+    required this.totalCount,
+    required this.showRequests,
+    required this.region,
+    required this.query,
+    required this.lastUpdated,
+    required this.onReset,
+    super.key,
+  });
+
+  final int visibleCount;
+  final int totalCount;
+  final bool showRequests;
+  final String region;
+  final String query;
+  final DateTime lastUpdated;
+  final VoidCallback onReset;
+
+  @override
+  Widget build(BuildContext context) {
+    final label = showRequests ? '도움 요청' : '보호 가능자';
+    final queryText = query.trim().isEmpty ? '검색어 없음' : '"${query.trim()}"';
+    final minute = lastUpdated.minute.toString().padLeft(2, '0');
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: _line),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 38,
+            height: 38,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: _softGreen,
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: Icon(
+              showRequests
+                  ? Icons.edit_note_outlined
+                  : Icons.volunteer_activism_outlined,
+              color: _brand,
+              size: 21,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '$label $visibleCount/$totalCount개 표시',
+                  style: const TextStyle(
+                    color: _ink,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  '$region · $queryText · ${lastUpdated.hour}:$minute 갱신',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(color: _muted, fontSize: 12),
+                ),
+              ],
+            ),
+          ),
+          IconButton(
+            onPressed: onReset,
+            tooltip: '필터 초기화',
+            icon: const Icon(Icons.restart_alt),
+            color: _brand,
+            style: IconButton.styleFrom(
+              backgroundColor: _softGreen,
+              fixedSize: const Size(38, 38),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class RequestPage extends StatefulWidget {
-  const RequestPage({super.key});
+  const RequestPage({
+    required this.onRegistered,
+    super.key,
+  });
+
+  final ValueChanged<RegistrationMode> onRegistered;
 
   @override
   State<RequestPage> createState() => _RequestPageState();
 }
 
 class _RequestPageState extends State<RequestPage> {
+  static const _requestDefaults = [
+    '강아지',
+    '임시 보호',
+    '서울 마포구',
+    '2개월',
+    '매일 산책 가능, 병원 기록 확인, 기존 보호자와 사전 조건 확인',
+  ];
+  static const _caregiverDefaults = [
+    '김하은',
+    '서울 마포구',
+    '2개월 임시 보호',
+    '재택 근무 중이라 평일 낮 돌봄 가능, 산책과 병원 동행 가능',
+  ];
+
   RegistrationMode _mode = RegistrationMode.request;
   String? _lastCreatedMessage;
   bool _loadingDrafts = true;
 
-  final _animal = TextEditingController(text: '강아지');
-  final _type = TextEditingController(text: '임시 보호');
-  final _location = TextEditingController(text: '서울 마포구');
-  final _period = TextEditingController(text: '2개월');
-  final _condition = TextEditingController(
-    text: '매일 산책 가능, 병원 기록 확인, 기존 보호자와 사전 조건 확인',
-  );
-  final _caregiverName = TextEditingController(text: '김하은');
-  final _caregiverLocation = TextEditingController(text: '서울 마포구');
-  final _availableCare = TextEditingController(text: '2개월 임시 보호');
-  final _caregiverDetail = TextEditingController(
-    text: '재택 근무 중이라 평일 낮 돌봄 가능, 산책과 병원 동행 가능',
-  );
+  final _animal = TextEditingController(text: _requestDefaults[0]);
+  final _type = TextEditingController(text: _requestDefaults[1]);
+  final _location = TextEditingController(text: _requestDefaults[2]);
+  final _period = TextEditingController(text: _requestDefaults[3]);
+  final _condition = TextEditingController(text: _requestDefaults[4]);
+  final _caregiverName = TextEditingController(text: _caregiverDefaults[0]);
+  final _caregiverLocation = TextEditingController(text: _caregiverDefaults[1]);
+  final _availableCare = TextEditingController(text: _caregiverDefaults[2]);
+  final _caregiverDetail = TextEditingController(text: _caregiverDefaults[3]);
 
   @override
   void initState() {
@@ -1200,6 +1939,31 @@ class _RequestPageState extends State<RequestPage> {
     setState(() {
       _loadingDrafts = false;
     });
+  }
+
+  Future<void> _resetRequestDraft() async {
+    _animal.text = _requestDefaults[0];
+    _type.text = _requestDefaults[1];
+    _location.text = _requestDefaults[2];
+    _period.text = _requestDefaults[3];
+    _condition.text = _requestDefaults[4];
+    await LocalAppStore.clearRequestDraft();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('도움 요청 초안을 기본값으로 되돌렸어요.')),
+    );
+  }
+
+  Future<void> _resetCaregiverDraft() async {
+    _caregiverName.text = _caregiverDefaults[0];
+    _caregiverLocation.text = _caregiverDefaults[1];
+    _availableCare.text = _caregiverDefaults[2];
+    _caregiverDetail.text = _caregiverDefaults[3];
+    await LocalAppStore.clearCaregiverDraft();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('보호 가능 초안을 기본값으로 되돌렸어요.')),
+    );
   }
 
   void _saveRequestDraft() {
@@ -1281,6 +2045,7 @@ class _RequestPageState extends State<RequestPage> {
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('도움 요청이 등록됐어요. 홈 피드에서 확인할 수 있어요.')),
     );
+    widget.onRegistered(RegistrationMode.request);
   }
 
   Future<void> _submitCaregiver() async {
@@ -1314,6 +2079,7 @@ class _RequestPageState extends State<RequestPage> {
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('보호 가능 프로필이 등록됐어요. 홈 피드에서 확인할 수 있어요.')),
     );
+    widget.onRegistered(RegistrationMode.caregiver);
   }
 
   void _changeMode(RegistrationMode mode) {
@@ -1353,6 +2119,7 @@ class _RequestPageState extends State<RequestPage> {
                   period: _period,
                   condition: _condition,
                   onSubmit: _submitRequest,
+                  onReset: _resetRequestDraft,
                 )
               : CaregiverRegistrationForm(
                   name: _caregiverName,
@@ -1360,6 +2127,7 @@ class _RequestPageState extends State<RequestPage> {
                   availableCare: _availableCare,
                   detail: _caregiverDetail,
                   onSubmit: _submitCaregiver,
+                  onReset: _resetCaregiverDraft,
                 ),
         ),
         RegistrationGuideCard(mode: _mode),
@@ -1527,6 +2295,7 @@ class RequestRegistrationForm extends StatelessWidget {
     required this.period,
     required this.condition,
     required this.onSubmit,
+    required this.onReset,
     super.key,
   });
 
@@ -1536,6 +2305,7 @@ class RequestRegistrationForm extends StatelessWidget {
   final TextEditingController period;
   final TextEditingController condition;
   final VoidCallback onSubmit;
+  final VoidCallback onReset;
 
   @override
   Widget build(BuildContext context) {
@@ -1564,6 +2334,20 @@ class RequestRegistrationForm extends StatelessWidget {
             ),
           ),
         ),
+        const SizedBox(height: 8),
+        OutlinedButton.icon(
+          onPressed: onReset,
+          icon: const Icon(Icons.restart_alt),
+          label: const Text('초안 초기화'),
+          style: OutlinedButton.styleFrom(
+            foregroundColor: _brand,
+            side: const BorderSide(color: _line),
+            minimumSize: const Size.fromHeight(48),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(14),
+            ),
+          ),
+        ),
       ],
     );
   }
@@ -1576,6 +2360,7 @@ class CaregiverRegistrationForm extends StatelessWidget {
     required this.availableCare,
     required this.detail,
     required this.onSubmit,
+    required this.onReset,
     super.key,
   });
 
@@ -1584,6 +2369,7 @@ class CaregiverRegistrationForm extends StatelessWidget {
   final TextEditingController availableCare;
   final TextEditingController detail;
   final VoidCallback onSubmit;
+  final VoidCallback onReset;
 
   @override
   Widget build(BuildContext context) {
@@ -1611,12 +2397,26 @@ class CaregiverRegistrationForm extends StatelessWidget {
             ),
           ),
         ),
+        const SizedBox(height: 8),
+        OutlinedButton.icon(
+          onPressed: onReset,
+          icon: const Icon(Icons.restart_alt),
+          label: const Text('초안 초기화'),
+          style: OutlinedButton.styleFrom(
+            foregroundColor: _brand,
+            side: const BorderSide(color: _line),
+            minimumSize: const Size.fromHeight(48),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(14),
+            ),
+          ),
+        ),
       ],
     );
   }
 }
 
-class MatchPage extends StatelessWidget {
+class MatchPage extends StatefulWidget {
   const MatchPage({
     required this.requesterConfirmed,
     required this.caregiverConfirmed,
@@ -1631,110 +2431,125 @@ class MatchPage extends StatelessWidget {
   final ValueChanged<bool> onCaregiverChanged;
 
   @override
+  State<MatchPage> createState() => _MatchPageState();
+}
+
+class _MatchPageState extends State<MatchPage> {
+  late Future<List<MatchBundle>> _bundlesFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _bundlesFuture = _loadMatchBundles();
+  }
+
+  Future<void> _refreshMatches() async {
+    setState(() {
+      _bundlesFuture = _loadMatchBundles();
+    });
+    await _bundlesFuture;
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final chatOpen = requesterConfirmed && caregiverConfirmed;
+    final chatOpen = widget.requesterConfirmed && widget.caregiverConfirmed;
 
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(20, 18, 20, 28),
-      children: [
-        const PageTitle(
-          title: '1대1 매칭',
-          subtitle: '양쪽이 모두 선택해야 비공개 채팅이 열립니다.',
-        ),
-        FutureBuilder<List<MatchBundle>>(
-          future: _loadMatchBundles(),
-          builder: (context, snapshot) {
-            if (!snapshot.hasData) {
-              return const AppCard(
-                child: SizedBox(
-                  height: 92,
-                  child:
-                      Center(child: CircularProgressIndicator(color: _brand)),
-                ),
-              );
-            }
+    return RefreshIndicator(
+      color: _brand,
+      onRefresh: _refreshMatches,
+      child: ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.fromLTRB(20, 18, 20, 28),
+        children: [
+          const PageTitle(
+            title: '1대1 매칭',
+            subtitle: '양쪽이 모두 선택해야 비공개 채팅이 열립니다.',
+          ),
+          FutureBuilder<List<MatchBundle>>(
+            future: _bundlesFuture,
+            builder: (context, snapshot) {
+              if (!snapshot.hasData) {
+                return const AppCard(
+                  child: SizedBox(
+                    height: 92,
+                    child:
+                        Center(child: CircularProgressIndicator(color: _brand)),
+                  ),
+                );
+              }
 
-            final bundles = snapshot.data!;
-            if (bundles.isEmpty) {
-              return const EmptyResultCard(
-                title: '진행 중인 매칭이 없어요',
-                copy: '등록을 마친 뒤 홈 피드에서 상대를 선택하면 매칭 검토가 시작됩니다.',
-              );
-            }
+              final bundles = snapshot.data!;
+              if (bundles.isEmpty) {
+                return const EmptyResultCard(
+                  title: '진행 중인 매칭이 없어요',
+                  copy: '등록을 마친 뒤 홈 피드에서 상대를 선택하면 매칭 검토가 시작됩니다.',
+                );
+              }
 
-            return Column(
-              children: [
-                for (final bundle in bundles.take(3))
-                  MatchSummaryCard(
-                    bundle: bundle,
-                    onTap: () {
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  for (final bundle in bundles.take(3))
+                    MatchSummaryCard(
+                      bundle: bundle,
+                      onTap: () {
+                        Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            builder: (_) =>
+                                MatchDetailPage(matchId: bundle.match.id),
+                          ),
+                        );
+                      },
+                    ),
+                  NoticeBox(
+                    title: '진행 중인 매칭 ${bundles.length}건',
+                    copy: '매칭은 요청자와 보호 가능자가 모두 확정해야 채팅으로 이어집니다.',
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: () {
                       Navigator.of(context).push(
                         MaterialPageRoute<void>(
-                          builder: (_) =>
-                              MatchDetailPage(matchId: bundle.match.id),
+                          builder: (_) => const MatchHistoryPage(),
                         ),
                       );
                     },
-                  ),
-              ],
-            );
-          },
-        ),
-        FutureBuilder<List<MatchRecord>>(
-          future: _poomRepository.readMatches(),
-          builder: (context, snapshot) {
-            final count = snapshot.data?.length ?? 0;
-            return Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                NoticeBox(
-                  title: '진행 중인 매칭 $count건',
-                  copy: '매칭은 요청자와 보호 가능자가 모두 확정해야 채팅으로 이어집니다.',
-                ),
-                OutlinedButton.icon(
-                  onPressed: () {
-                    Navigator.of(context).push(
-                      MaterialPageRoute<void>(
-                        builder: (_) => const MatchHistoryPage(),
+                    icon: const Icon(Icons.history),
+                    label: const Text('매칭 이력 보기'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: _brand,
+                      side: const BorderSide(color: _line),
+                      minimumSize: const Size.fromHeight(48),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(14),
                       ),
-                    );
-                  },
-                  icon: const Icon(Icons.history),
-                  label: const Text('매칭 이력 보기'),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: _brand,
-                    side: const BorderSide(color: _line),
-                    minimumSize: const Size.fromHeight(48),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(14),
                     ),
                   ),
-                ),
-                const SizedBox(height: 12),
-              ],
-            );
-          },
-        ),
-        ConfirmCard(
-          label: '요청자',
-          name: '모카 보호자',
-          value: requesterConfirmed,
-          onChanged: onRequesterChanged,
-        ),
-        ConfirmCard(
-          label: '보호 가능자',
-          name: '김하은',
-          value: caregiverConfirmed,
-          onChanged: onCaregiverChanged,
-        ),
-        NoticeBox(
-          title: chatOpen ? '채팅방이 열렸어요' : '아직 채팅방이 닫혀 있어요',
-          copy: chatOpen
-              ? '이제 앱 안에서 인계 일정과 필요한 정보를 조율할 수 있어요.'
-              : '서로 확정하면 비공개 채팅이 시작됩니다.',
-          success: chatOpen,
-        ),
-      ],
+                  const SizedBox(height: 12),
+                ],
+              );
+            },
+          ),
+          ConfirmCard(
+            label: '요청자',
+            name: '모카 보호자',
+            value: widget.requesterConfirmed,
+            onChanged: widget.onRequesterChanged,
+          ),
+          ConfirmCard(
+            label: '보호 가능자',
+            name: '김하은',
+            value: widget.caregiverConfirmed,
+            onChanged: widget.onCaregiverChanged,
+          ),
+          NoticeBox(
+            title: chatOpen ? '채팅방이 열렸어요' : '아직 채팅방이 닫혀 있어요',
+            copy: chatOpen
+                ? '이제 앱 안에서 인계 일정과 필요한 정보를 조율할 수 있어요.'
+                : '서로 확정하면 비공개 채팅이 시작됩니다.',
+            success: chatOpen,
+          ),
+        ],
+      ),
     );
   }
 }
@@ -1760,7 +2575,7 @@ class ChatPage extends StatelessWidget {
   }
 }
 
-class ChatRoomList extends StatelessWidget {
+class ChatRoomList extends StatefulWidget {
   const ChatRoomList({
     required this.onOpenRoom,
     super.key,
@@ -1769,47 +2584,73 @@ class ChatRoomList extends StatelessWidget {
   final ValueChanged<String> onOpenRoom;
 
   @override
-  Widget build(BuildContext context) {
-    return FutureBuilder<List<MatchBundle>>(
-      future: _loadMatchBundles(),
-      builder: (context, snapshot) {
-        if (!snapshot.hasData) {
-          return const Center(child: CircularProgressIndicator(color: _brand));
-        }
+  State<ChatRoomList> createState() => _ChatRoomListState();
+}
 
-        final bundles = snapshot.data!;
-        final openRoomCount =
-            bundles.where((bundle) => bundle.match.chatOpen).length;
-        return ListView(
-          padding: const EdgeInsets.fromLTRB(20, 18, 20, 28),
-          children: [
-            PageTitle(
-              title: '채팅방',
-              subtitle: openRoomCount > 0
-                  ? '상호 확정된 매칭에서 대화를 이어갑니다.'
-                  : '양쪽이 모두 확정되면 채팅방이 열립니다.',
-            ),
-            if (openRoomCount == 0)
-              const NoticeBox(
-                title: '채팅은 아직 열리지 않았어요',
-                copy: '요청자와 보호 가능자가 모두 확정하면 대화할 수 있어요.',
-                success: false,
+class _ChatRoomListState extends State<ChatRoomList> {
+  late Future<List<MatchBundle>> _roomsFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _roomsFuture = _loadMatchBundles();
+  }
+
+  Future<void> _refreshRooms() async {
+    setState(() {
+      _roomsFuture = _loadMatchBundles();
+    });
+    await _roomsFuture;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return RefreshIndicator(
+      color: _brand,
+      onRefresh: _refreshRooms,
+      child: FutureBuilder<List<MatchBundle>>(
+        future: _roomsFuture,
+        builder: (context, snapshot) {
+          if (!snapshot.hasData) {
+            return const Center(
+                child: CircularProgressIndicator(color: _brand));
+          }
+
+          final bundles = snapshot.data!;
+          final openRoomCount =
+              bundles.where((bundle) => bundle.match.chatOpen).length;
+          return ListView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            padding: const EdgeInsets.fromLTRB(20, 18, 20, 28),
+            children: [
+              PageTitle(
+                title: '채팅방',
+                subtitle: openRoomCount > 0
+                    ? '상호 확정된 매칭에서 대화를 이어갑니다.'
+                    : '양쪽이 모두 확정되면 채팅방이 열립니다.',
               ),
-            if (bundles.isEmpty)
-              const EmptyResultCard(
-                title: '아직 채팅방이 없어요',
-                copy: '매칭을 먼저 생성하고 양쪽 확정을 진행해 주세요.',
-              )
-            else
-              for (final bundle in bundles)
-                ChatRoomCard(
-                  bundle: bundle,
-                  enabled: bundle.match.chatOpen,
-                  onTap: () => onOpenRoom(bundle.match.id),
+              if (openRoomCount == 0)
+                const NoticeBox(
+                  title: '채팅은 아직 열리지 않았어요',
+                  copy: '요청자와 보호 가능자가 모두 확정하면 대화할 수 있어요.',
+                  success: false,
                 ),
-          ],
-        );
-      },
+              if (bundles.isEmpty)
+                const EmptyResultCard(
+                  title: '아직 채팅방이 없어요',
+                  copy: '매칭을 먼저 생성하고 양쪽 확정을 진행해 주세요.',
+                )
+              else
+                for (final bundle in bundles)
+                  ChatRoomCard(
+                    bundle: bundle,
+                    enabled: bundle.match.chatOpen,
+                    onTap: () => widget.onOpenRoom(bundle.match.id),
+                  ),
+            ],
+          );
+        },
+      ),
     );
   }
 }
@@ -1908,11 +2749,18 @@ class ChatRoomPage extends StatefulWidget {
 
 class _ChatRoomPageState extends State<ChatRoomPage> {
   late Future<List<ChatMessageRecord>> _messagesFuture;
+  final _inputController = TextEditingController();
 
   @override
   void initState() {
     super.initState();
     _messagesFuture = _poomRepository.fetchChatMessages(widget.matchId);
+  }
+
+  @override
+  void dispose() {
+    _inputController.dispose();
+    super.dispose();
   }
 
   Future<void> _sendMessage(String text) async {
@@ -1932,6 +2780,11 @@ class _ChatRoomPageState extends State<ChatRoomPage> {
     setState(() {
       _messagesFuture = _poomRepository.fetchChatMessages(widget.matchId);
     });
+  }
+
+  void _useQuickMessage(String text) {
+    _inputController.text = text;
+    _inputController.selection = TextSelection.collapsed(offset: text.length);
   }
 
   @override
@@ -1958,6 +2811,7 @@ class _ChatRoomPageState extends State<ChatRoomPage> {
                   children: [
                     const PageTitle(
                         title: '비공개 대화', subtitle: '인계 일정과 필요한 정보를 조율합니다.'),
+                    const ChatGuideCard(),
                     if (!snapshot.hasData)
                       const AppCard(
                         child: SizedBox(
@@ -1984,8 +2838,114 @@ class _ChatRoomPageState extends State<ChatRoomPage> {
               },
             ),
           ),
-          ChatInputBar(onSend: _sendMessage),
+          QuickMessageBar(onSelected: _useQuickMessage),
+          ChatInputBar(
+            controller: _inputController,
+            onSend: _sendMessage,
+          ),
         ],
+      ),
+    );
+  }
+}
+
+class ChatGuideCard extends StatelessWidget {
+  const ChatGuideCard({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return AppCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: const [
+          Text(
+            '대화 전 확인하면 좋아요',
+            style: TextStyle(
+              color: _ink,
+              fontSize: 17,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          SizedBox(height: 10),
+          ChatGuideRow(text: '인계 날짜와 장소는 서로 확정한 뒤 공유하기'),
+          ChatGuideRow(text: '병원 기록, 식사량, 생활 습관 먼저 정리하기'),
+          ChatGuideRow(text: '연락처와 주소는 필요한 범위에서만 나누기', last: true),
+        ],
+      ),
+    );
+  }
+}
+
+class ChatGuideRow extends StatelessWidget {
+  const ChatGuideRow({
+    required this.text,
+    this.last = false,
+    super.key,
+  });
+
+  final String text;
+  final bool last;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.only(bottom: last ? 0 : 8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(Icons.check_circle_outline, color: _brand, size: 20),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              text,
+              style: const TextStyle(color: _muted, height: 1.35),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class QuickMessageBar extends StatelessWidget {
+  const QuickMessageBar({required this.onSelected, super.key});
+
+  final ValueChanged<String> onSelected;
+
+  static const _messages = [
+    '가능한 인계 시간을 알려주세요.',
+    '사료와 병원 기록을 함께 전달할게요.',
+    '생활 습관 중 꼭 알아야 할 점이 있을까요?',
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(16, 10, 16, 8),
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        border: Border(top: BorderSide(color: _line)),
+      ),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          children: [
+            for (final message in _messages) ...[
+              ActionChip(
+                label: Text(message),
+                labelStyle: const TextStyle(
+                  color: _brandDark,
+                  fontWeight: FontWeight.w800,
+                ),
+                backgroundColor: _softGreen,
+                side: const BorderSide(color: _line),
+                onPressed: () => onSelected(message),
+              ),
+              const SizedBox(width: 8),
+            ],
+          ],
+        ),
       ),
     );
   }
@@ -2157,6 +3117,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
                   meta: bundle.caregiverMeta,
                   body: bundle.caregiver?.detail ?? '보호 가능자 정보를 확인할 수 없어요.',
                 ),
+                const MatchSafetyCard(),
                 if (!bundle.match.chatOpen)
                   MatchActionCard(
                     bundle: bundle,
@@ -2342,6 +3303,120 @@ class MatchInfoCard extends StatelessWidget {
                 Text(meta, style: const TextStyle(color: _muted)),
                 const SizedBox(height: 9),
                 Text(body, style: const TextStyle(color: _muted, height: 1.35)),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class MatchSafetyCard extends StatelessWidget {
+  const MatchSafetyCard({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return AppCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            '안전 체크',
+            style: TextStyle(
+              color: _ink,
+              fontSize: 18,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          const SizedBox(height: 12),
+          const SafetyCheckRow(
+            icon: Icons.privacy_tip_outlined,
+            title: '개인 정보는 천천히',
+            copy: '주소와 연락처는 상호 확정 후 필요한 만큼만 공유해요.',
+          ),
+          const SafetyCheckRow(
+            icon: Icons.assignment_outlined,
+            title: '조건은 기록으로 남기기',
+            copy: '기간, 식사, 병원 기록, 비용 여부를 채팅 안에서 확인해요.',
+          ),
+          const SafetyCheckRow(
+            icon: Icons.place_outlined,
+            title: '인계 장소는 명확하게',
+            copy: '처음 만나는 장소와 시간을 서로 다시 확인해요.',
+            last: true,
+          ),
+          const SizedBox(height: 12),
+          OutlinedButton.icon(
+            onPressed: () {
+              Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => const SafetyCenterPage(),
+                ),
+              );
+            },
+            icon: const Icon(Icons.health_and_safety_outlined),
+            label: const Text('안전 센터 보기'),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: _brand,
+              side: const BorderSide(color: _line),
+              minimumSize: const Size.fromHeight(46),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(14),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class SafetyCheckRow extends StatelessWidget {
+  const SafetyCheckRow({
+    required this.icon,
+    required this.title,
+    required this.copy,
+    this.last = false,
+    super.key,
+  });
+
+  final IconData icon;
+  final String title;
+  final String copy;
+  final bool last;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.only(bottom: last ? 0 : 12),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 38,
+            height: 38,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: _softGreen,
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: Icon(icon, color: _brand, size: 21),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    color: _ink,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(copy, style: const TextStyle(color: _muted, height: 1.35)),
               ],
             ),
           ),
@@ -2700,11 +3775,36 @@ class HandoffPage extends StatefulWidget {
 
 class _HandoffPageState extends State<HandoffPage> {
   late Future<_HandoffOverview> _overviewFuture;
+  final _memoController = TextEditingController();
+  bool _memoLoaded = false;
 
   @override
   void initState() {
     super.initState();
     _overviewFuture = _loadOverview();
+    _loadMemo();
+    _memoController.addListener(_saveMemo);
+  }
+
+  @override
+  void dispose() {
+    _memoController.removeListener(_saveMemo);
+    _memoController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadMemo() async {
+    final memo = await LocalAppStore.readHandoffMemo();
+    if (!mounted) return;
+    _memoController.text = memo;
+    setState(() {
+      _memoLoaded = true;
+    });
+  }
+
+  void _saveMemo() {
+    if (!_memoLoaded) return;
+    LocalAppStore.saveHandoffMemo(_memoController.text);
   }
 
   Future<_HandoffOverview> _loadOverview() async {
@@ -2760,17 +3860,168 @@ class _HandoffPageState extends State<HandoffPage> {
                   success: overview.hasOpenMatch,
                 ),
                 _HandoffProgressCard(overview: overview),
+                const HandoffDayCheckCard(),
                 for (final task in overview.tasks)
                   ChecklistCard(
                     title: task.title,
                     done: task.done,
                     onTap: () => _toggleTask(task),
                   ),
+                HandoffMemoCard(
+                  controller: _memoController,
+                  loaded: _memoLoaded,
+                ),
               ],
             );
           },
         ),
       ],
+    );
+  }
+}
+
+class HandoffDayCheckCard extends StatelessWidget {
+  const HandoffDayCheckCard({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return AppCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: const [
+          Text(
+            '인계 당일 체크',
+            style: TextStyle(
+              color: _ink,
+              fontSize: 18,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          SizedBox(height: 12),
+          HandoffDayCheckRow(
+            icon: Icons.place_outlined,
+            title: '장소와 시간',
+            copy: '만나는 위치와 도착 시간을 채팅에서 다시 확인합니다.',
+          ),
+          HandoffDayCheckRow(
+            icon: Icons.inventory_2_outlined,
+            title: '전달 물품',
+            copy: '사료, 약, 병원 기록, 평소 쓰던 물품을 준비합니다.',
+          ),
+          HandoffDayCheckRow(
+            icon: Icons.sms_outlined,
+            title: '첫 확인 메시지',
+            copy: '인계 후 상태를 짧게 남기면 서로 안심할 수 있어요.',
+            last: true,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class HandoffDayCheckRow extends StatelessWidget {
+  const HandoffDayCheckRow({
+    required this.icon,
+    required this.title,
+    required this.copy,
+    this.last = false,
+    super.key,
+  });
+
+  final IconData icon;
+  final String title;
+  final String copy;
+  final bool last;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.only(bottom: last ? 0 : 12),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 38,
+            height: 38,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: _softGreen,
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: Icon(icon, color: _brand, size: 21),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    color: _ink,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(copy, style: const TextStyle(color: _muted, height: 1.35)),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class HandoffMemoCard extends StatelessWidget {
+  const HandoffMemoCard({
+    required this.controller,
+    required this.loaded,
+    super.key,
+  });
+
+  final TextEditingController controller;
+  final bool loaded;
+
+  @override
+  Widget build(BuildContext context) {
+    return AppCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            '인계 메모',
+            style: TextStyle(
+              color: _ink,
+              fontSize: 18,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          const SizedBox(height: 6),
+          const Text(
+            '장소, 시간, 주의사항을 자유롭게 적어두세요. 이 기기에 자동 저장됩니다.',
+            style: TextStyle(color: _muted),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: controller,
+            enabled: loaded,
+            minLines: 4,
+            maxLines: 7,
+            decoration: InputDecoration(
+              hintText: '예: 토요일 오후 2시, 사료 2주분, 병원 기록 파일 준비',
+              filled: true,
+              fillColor: _bg,
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(16),
+                borderSide: BorderSide.none,
+              ),
+              contentPadding: const EdgeInsets.all(14),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -3216,6 +4467,958 @@ class ActivityMetricTile extends StatelessWidget {
   }
 }
 
+class DraftSummaryCard extends StatelessWidget {
+  const DraftSummaryCard({super.key});
+
+  Future<_DraftSummary> _loadDrafts() async {
+    final request = await LocalAppStore.readRequestDraft();
+    final caregiver = await LocalAppStore.readCaregiverDraft();
+    return _DraftSummary(request: request, caregiver: caregiver);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<_DraftSummary>(
+      future: _loadDrafts(),
+      builder: (context, snapshot) {
+        if (!snapshot.hasData) {
+          return const AppCard(
+            child: SizedBox(
+              height: 76,
+              child: Center(child: CircularProgressIndicator(color: _brand)),
+            ),
+          );
+        }
+
+        final summary = snapshot.data!;
+        return AppCard(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                '작성 중인 초안',
+                style: TextStyle(
+                  color: _ink,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              const SizedBox(height: 12),
+              DraftSummaryRow(
+                icon: Icons.edit_note_outlined,
+                title: '도움 요청',
+                copy: summary.request == null
+                    ? '저장된 초안 없음'
+                    : '${summary.request![2]} · ${summary.request![3]}',
+                active: summary.request != null,
+              ),
+              DraftSummaryRow(
+                icon: Icons.volunteer_activism_outlined,
+                title: '보호 가능',
+                copy: summary.caregiver == null
+                    ? '저장된 초안 없음'
+                    : '${summary.caregiver![1]} · ${summary.caregiver![2]}',
+                active: summary.caregiver != null,
+                last: true,
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _DraftSummary {
+  const _DraftSummary({
+    required this.request,
+    required this.caregiver,
+  });
+
+  final List<String>? request;
+  final List<String>? caregiver;
+}
+
+class DraftSummaryRow extends StatelessWidget {
+  const DraftSummaryRow({
+    required this.icon,
+    required this.title,
+    required this.copy,
+    required this.active,
+    this.last = false,
+    super.key,
+  });
+
+  final IconData icon;
+  final String title;
+  final String copy;
+  final bool active;
+  final bool last;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: EdgeInsets.only(bottom: last ? 0 : 8),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: active ? _softGreen : _bg,
+        borderRadius: BorderRadius.circular(14),
+        border:
+            Border.all(color: active ? _brand.withValues(alpha: 0.18) : _line),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, color: active ? _brand : _muted, size: 22),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    color: _ink,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  copy,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(color: _muted, fontSize: 13),
+                ),
+              ],
+            ),
+          ),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(999),
+              border: Border.all(color: _line),
+            ),
+            child: Text(
+              active ? '저장됨' : '없음',
+              style: TextStyle(
+                color: active ? _brand : _muted,
+                fontSize: 12,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class MyPoomPage extends StatelessWidget {
+  const MyPoomPage({
+    required this.chatOpen,
+    required this.role,
+    required this.matchNotifications,
+    required this.chatNotifications,
+    required this.onRoleChanged,
+    required this.onMatchNotificationsChanged,
+    required this.onChatNotificationsChanged,
+    super.key,
+  });
+
+  final bool chatOpen;
+  final AppRole role;
+  final bool matchNotifications;
+  final bool chatNotifications;
+  final ValueChanged<AppRole> onRoleChanged;
+  final ValueChanged<bool> onMatchNotificationsChanged;
+  final ValueChanged<bool> onChatNotificationsChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        backgroundColor: Colors.white,
+        surfaceTintColor: Colors.white,
+        title: const Text(
+          '내 품',
+          style: TextStyle(color: _ink, fontWeight: FontWeight.w900),
+        ),
+      ),
+      body: ResponsivePage(
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(20, 18, 20, 28),
+          children: [
+            PageTitle(
+              title: role.label,
+              subtitle: '내 활동과 진행 중인 연결을 확인합니다.',
+            ),
+            MyPoomProfileCard(role: role),
+            const ActivitySummaryCard(),
+            const DraftSummaryCard(),
+            const MyPoomStatusCard(),
+            MyPoomShortcutGrid(
+              onOpenFavorites: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => const FavoriteListPage(),
+                  ),
+                );
+              },
+              onOpenMatches: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => const MatchHistoryPage(),
+                  ),
+                );
+              },
+              onOpenNotifications: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => NotificationCenterPage(
+                      chatOpen: chatOpen,
+                      matchNotifications: matchNotifications,
+                      chatNotifications: chatNotifications,
+                    ),
+                  ),
+                );
+              },
+              onOpenSafety: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => const SafetyCenterPage(),
+                  ),
+                );
+              },
+              onOpenSettings: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => SettingsPage(
+                      role: role,
+                      matchNotifications: matchNotifications,
+                      chatNotifications: chatNotifications,
+                      onRoleChanged: onRoleChanged,
+                      onMatchNotificationsChanged: onMatchNotificationsChanged,
+                      onChatNotificationsChanged: onChatNotificationsChanged,
+                    ),
+                  ),
+                );
+              },
+            ),
+            const MyPoomMatchPreview(),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class MyPoomProfileCard extends StatelessWidget {
+  const MyPoomProfileCard({required this.role, super.key});
+
+  final AppRole role;
+
+  @override
+  Widget build(BuildContext context) {
+    return AppCard(
+      child: Row(
+        children: [
+          const BrandMark(size: 52, radius: 16, fontSize: 22),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  role == AppRole.requester ? '도움이 필요한 보호자' : '도움을 줄 수 있는 사람',
+                  style: const TextStyle(
+                    color: _ink,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 5),
+                Text(
+                  role == AppRole.requester
+                      ? '요청을 등록하고 적합한 보호 가능자를 확인합니다.'
+                      : '도움 요청을 살펴보고 가능한 연결을 선택합니다.',
+                  style: const TextStyle(color: _muted),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class MyPoomShortcutGrid extends StatelessWidget {
+  const MyPoomShortcutGrid({
+    required this.onOpenFavorites,
+    required this.onOpenMatches,
+    required this.onOpenNotifications,
+    required this.onOpenSafety,
+    required this.onOpenSettings,
+    super.key,
+  });
+
+  final VoidCallback onOpenFavorites;
+  final VoidCallback onOpenMatches;
+  final VoidCallback onOpenNotifications;
+  final VoidCallback onOpenSafety;
+  final VoidCallback onOpenSettings;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final compact = constraints.maxWidth < 420;
+        final tiles = [
+          MyPoomShortcutTile(
+            icon: Icons.bookmark_border,
+            label: '관심 목록',
+            onTap: onOpenFavorites,
+          ),
+          MyPoomShortcutTile(
+            icon: Icons.handshake_outlined,
+            label: '매칭 이력',
+            onTap: onOpenMatches,
+          ),
+          MyPoomShortcutTile(
+            icon: Icons.notifications_none,
+            label: '알림함',
+            onTap: onOpenNotifications,
+          ),
+          MyPoomShortcutTile(
+            icon: Icons.health_and_safety_outlined,
+            label: '안전 센터',
+            onTap: onOpenSafety,
+          ),
+          MyPoomShortcutTile(
+            icon: Icons.tune_outlined,
+            label: '설정',
+            onTap: onOpenSettings,
+          ),
+        ];
+
+        if (compact) {
+          return Column(
+            children: [
+              Row(children: tiles.take(2).toList()),
+              const SizedBox(height: 8),
+              Row(children: tiles.skip(2).take(2).toList()),
+              const SizedBox(height: 8),
+              Row(children: tiles.skip(4).toList()),
+              const SizedBox(height: 12),
+            ],
+          );
+        }
+
+        return Column(
+          children: [
+            Row(children: tiles),
+            const SizedBox(height: 12),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class MyPoomStatusCard extends StatelessWidget {
+  const MyPoomStatusCard({super.key});
+
+  Future<_MyPoomStatus> _loadStatus() async {
+    final matches = await _poomRepository.readMatches();
+    final tasks = await _poomRepository.readHandoffTasks();
+    return _MyPoomStatus(
+      waitingMatches: matches.where((match) => !match.chatOpen).length,
+      openChats: matches.where((match) => match.chatOpen).length,
+      remainingTasks: tasks.where((task) => !task.done).length,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<_MyPoomStatus>(
+      future: _loadStatus(),
+      builder: (context, snapshot) {
+        if (!snapshot.hasData) {
+          return const AppCard(
+            child: SizedBox(
+              height: 76,
+              child: Center(child: CircularProgressIndicator(color: _brand)),
+            ),
+          );
+        }
+
+        final status = snapshot.data!;
+        return AppCard(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                '지금 확인할 일',
+                style: TextStyle(
+                  color: _ink,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              const SizedBox(height: 12),
+              MyPoomStatusRow(
+                icon: Icons.handshake_outlined,
+                title: '상호 확정 대기',
+                value: '${status.waitingMatches}건',
+              ),
+              MyPoomStatusRow(
+                icon: Icons.chat_bubble_outline,
+                title: '열린 채팅방',
+                value: '${status.openChats}개',
+              ),
+              MyPoomStatusRow(
+                icon: Icons.fact_check_outlined,
+                title: '남은 인계 체크',
+                value: '${status.remainingTasks}개',
+                last: true,
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _MyPoomStatus {
+  const _MyPoomStatus({
+    required this.waitingMatches,
+    required this.openChats,
+    required this.remainingTasks,
+  });
+
+  final int waitingMatches;
+  final int openChats;
+  final int remainingTasks;
+}
+
+class MyPoomStatusRow extends StatelessWidget {
+  const MyPoomStatusRow({
+    required this.icon,
+    required this.title,
+    required this.value,
+    this.last = false,
+    super.key,
+  });
+
+  final IconData icon;
+  final String title;
+  final String value;
+  final bool last;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.only(bottom: last ? 0 : 10),
+      child: Row(
+        children: [
+          Icon(icon, color: _brand, size: 22),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              title,
+              style: const TextStyle(
+                color: _ink,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+          ),
+          Text(
+            value,
+            style: const TextStyle(
+              color: _brand,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class MyPoomShortcutTile extends StatelessWidget {
+  const MyPoomShortcutTile({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+    super.key,
+  });
+
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Expanded(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 3),
+        child: AppCard(
+          padding: EdgeInsets.zero,
+          child: InkWell(
+            onTap: onTap,
+            borderRadius: BorderRadius.circular(22),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 16),
+              child: Column(
+                children: [
+                  Icon(icon, color: _brand),
+                  const SizedBox(height: 7),
+                  Text(
+                    label,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      color: _ink,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class MyPoomMatchPreview extends StatelessWidget {
+  const MyPoomMatchPreview({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<List<MatchBundle>>(
+      future: _loadMatchBundles(),
+      builder: (context, snapshot) {
+        if (!snapshot.hasData) {
+          return const AppCard(
+            child: SizedBox(
+              height: 84,
+              child: Center(child: CircularProgressIndicator(color: _brand)),
+            ),
+          );
+        }
+
+        final bundles = snapshot.data!;
+        if (bundles.isEmpty) {
+          return const EmptyResultCard(
+            title: '진행 중인 연결이 없어요',
+            copy: '홈 피드에서 요청이나 보호 가능자를 선택해 매칭을 시작해 보세요.',
+          );
+        }
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const SectionHeader(title: '최근 연결', action: '상세 보기'),
+            for (final bundle in bundles.take(2))
+              MatchSummaryCard(
+                bundle: bundle,
+                onTap: () {
+                  Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => MatchDetailPage(matchId: bundle.match.id),
+                    ),
+                  );
+                },
+              ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class FavoriteListPage extends StatefulWidget {
+  const FavoriteListPage({super.key});
+
+  @override
+  State<FavoriteListPage> createState() => _FavoriteListPageState();
+}
+
+class _FavoriteListPageState extends State<FavoriteListPage> {
+  late Future<_FavoriteOverview> _favoritesFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _favoritesFuture = _loadFavorites();
+  }
+
+  Future<_FavoriteOverview> _loadFavorites() async {
+    final ids = await LocalAppStore.readFavorites();
+    final feed = await _poomRepository.fetchHomeFeed();
+    return _FavoriteOverview(
+      ids: ids,
+      requests:
+          feed.requests.where((request) => ids.contains(request.id)).toList(),
+      caregivers: feed.caregivers
+          .where((caregiver) => ids.contains(caregiver.id))
+          .toList(),
+    );
+  }
+
+  Future<void> _removeFavorite(String id) async {
+    final overview = await _favoritesFuture;
+    final nextIds = {...overview.ids}..remove(id);
+    await LocalAppStore.saveFavorites(nextIds);
+    setState(() {
+      _favoritesFuture = _loadFavorites();
+    });
+  }
+
+  void _showRequestDetail(BuildContext context, CareRequest request) {
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (context) {
+        return DetailSheet(
+          title: request.title,
+          subtitle: request.meta,
+          rows: [
+            DetailRow(label: '요청 ID', value: request.id),
+            DetailRow(label: '상태', value: request.tag),
+            DetailRow(label: '조건', value: request.condition),
+            DetailRow(label: '설명', value: request.description),
+          ],
+        );
+      },
+    );
+  }
+
+  void _showCaregiverDetail(BuildContext context, CaregiverProfile caregiver) {
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (context) {
+        return DetailSheet(
+          title: caregiver.name,
+          subtitle: caregiver.meta,
+          rows: [
+            DetailRow(label: '프로필 ID', value: caregiver.id),
+            DetailRow(label: '적합도', value: caregiver.matchLabel),
+            DetailRow(
+                label: '확인 상태', value: caregiver.verified ? '확인 완료' : '확인 대기'),
+            DetailRow(label: '상세', value: caregiver.detail),
+          ],
+        );
+      },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        backgroundColor: Colors.white,
+        surfaceTintColor: Colors.white,
+        title: const Text(
+          '관심 목록',
+          style: TextStyle(color: _ink, fontWeight: FontWeight.w900),
+        ),
+      ),
+      body: ResponsivePage(
+        child: FutureBuilder<_FavoriteOverview>(
+          future: _favoritesFuture,
+          builder: (context, snapshot) {
+            if (!snapshot.hasData) {
+              return const Center(
+                  child: CircularProgressIndicator(color: _brand));
+            }
+
+            final overview = snapshot.data!;
+            if (overview.isEmpty) {
+              return const EmptyState(
+                icon: Icons.bookmark_border,
+                title: '관심 목록이 비어 있어요',
+                copy: '홈 피드에서 나중에 다시 보고 싶은 항목을 표시해 보세요.',
+              );
+            }
+
+            return ListView(
+              padding: const EdgeInsets.fromLTRB(20, 18, 20, 28),
+              children: [
+                PageTitle(
+                  title: '관심 ${overview.count}개',
+                  subtitle: '다시 확인하고 싶은 요청과 보호 가능자를 모았습니다.',
+                ),
+                if (overview.requests.isNotEmpty) ...[
+                  const SectionHeader(title: '도움 요청', action: '저장됨'),
+                  for (final request in overview.requests)
+                    RequestFeedCard(
+                      id: request.id,
+                      tag: request.tag,
+                      title: request.title,
+                      meta: request.meta,
+                      description: request.description,
+                      progress: request.progress,
+                      favorite: true,
+                      onFavorite: () => _removeFavorite(request.id),
+                      onTap: () => _showRequestDetail(context, request),
+                    ),
+                ],
+                if (overview.caregivers.isNotEmpty) ...[
+                  const SectionHeader(title: '보호 가능자', action: '저장됨'),
+                  for (final caregiver in overview.caregivers)
+                    CaregiverFeedCard(
+                      id: caregiver.id,
+                      name: caregiver.name,
+                      meta: caregiver.meta,
+                      detail: caregiver.detail,
+                      match: caregiver.matchLabel,
+                      favorite: true,
+                      onFavorite: () => _removeFavorite(caregiver.id),
+                      onTap: () => _showCaregiverDetail(context, caregiver),
+                    ),
+                ],
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+class _FavoriteOverview {
+  const _FavoriteOverview({
+    required this.ids,
+    required this.requests,
+    required this.caregivers,
+  });
+
+  final Set<String> ids;
+  final List<CareRequest> requests;
+  final List<CaregiverProfile> caregivers;
+
+  int get count => requests.length + caregivers.length;
+  bool get isEmpty => count == 0;
+}
+
+class SafetyCenterPage extends StatelessWidget {
+  const SafetyCenterPage({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        backgroundColor: Colors.white,
+        surfaceTintColor: Colors.white,
+        title: const Text(
+          '안전 센터',
+          style: TextStyle(color: _ink, fontWeight: FontWeight.w900),
+        ),
+      ),
+      body: ResponsivePage(
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(20, 18, 20, 28),
+          children: const [
+            PageTitle(
+              title: '안전하게 연결하기',
+              subtitle: '매칭 전부터 인계 당일까지 꼭 필요한 기준만 모았습니다.',
+            ),
+            SafetyCenterHeroCard(),
+            SafetyTopicCard(
+              icon: Icons.visibility_off_outlined,
+              title: '공개 전',
+              copy: '상세 주소, 연락처, 개인 사정은 공개 피드에 적지 않습니다.',
+              items: [
+                '지역은 구 단위 정도로만 적기',
+                '연락처는 상호 확정 전 공유하지 않기',
+                '사진이나 감정적인 표현보다 조건 중심으로 작성하기',
+              ],
+            ),
+            SafetyTopicCard(
+              icon: Icons.handshake_outlined,
+              title: '매칭 중',
+              copy: '상대가 어떤 도움을 줄 수 있는지 앱 안에서 천천히 확인합니다.',
+              items: [
+                '기간, 돌봄 범위, 비용 여부를 채팅에 남기기',
+                '병원 기록과 생활 습관을 먼저 확인하기',
+                '불편한 요청은 확정하지 않고 대화를 멈추기',
+              ],
+            ),
+            SafetyTopicCard(
+              icon: Icons.chat_bubble_outline,
+              title: '채팅 중',
+              copy: '채팅은 인계에 필요한 정보만 조율하는 공간입니다.',
+              items: [
+                '주소는 인계가 확정된 뒤 필요한 범위에서 공유하기',
+                '약속 변경은 채팅에 기록으로 남기기',
+                '상대가 부담스러운 정보를 요구하면 응답하지 않기',
+              ],
+            ),
+            SafetyTopicCard(
+              icon: Icons.fact_check_outlined,
+              title: '인계 당일',
+              copy: '만나는 장소와 전달 물품을 다시 확인합니다.',
+              items: [
+                '공개된 장소에서 만나기',
+                '사료, 약, 병원 기록, 비상 연락처 확인하기',
+                '인계 후 첫 확인 메시지를 남기기',
+              ],
+            ),
+            SafetyNoticeCard(),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class SafetyCenterHeroCard extends StatelessWidget {
+  const SafetyCenterHeroCard({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return AppCard(
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 48,
+            height: 48,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: _softGreen,
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: const Icon(Icons.health_and_safety_outlined, color: _brand),
+          ),
+          const SizedBox(width: 13),
+          const Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '빠르게 결정하지 않아도 괜찮아요',
+                  style: TextStyle(
+                    color: _ink,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                SizedBox(height: 6),
+                Text(
+                  '품은 공개 피드보다 상호 확인, 채팅보다 기록, 빠른 인계보다 안전한 인계를 우선합니다.',
+                  style: TextStyle(color: _muted, height: 1.35),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class SafetyTopicCard extends StatelessWidget {
+  const SafetyTopicCard({
+    required this.icon,
+    required this.title,
+    required this.copy,
+    required this.items,
+    super.key,
+  });
+
+  final IconData icon;
+  final String title;
+  final String copy;
+  final List<String> items;
+
+  @override
+  Widget build(BuildContext context) {
+    return AppCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(icon, color: _brand),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  title,
+                  style: const TextStyle(
+                    color: _ink,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 7),
+          Text(copy, style: const TextStyle(color: _muted, height: 1.35)),
+          const SizedBox(height: 12),
+          for (var i = 0; i < items.length; i++)
+            SafetyChecklistLine(
+              text: items[i],
+              last: i == items.length - 1,
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class SafetyChecklistLine extends StatelessWidget {
+  const SafetyChecklistLine({
+    required this.text,
+    this.last = false,
+    super.key,
+  });
+
+  final String text;
+  final bool last;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.only(bottom: last ? 0 : 8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(Icons.check_circle_outline, color: _brand, size: 20),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              text,
+              style: const TextStyle(color: _ink, height: 1.35),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class SafetyNoticeCard extends StatelessWidget {
+  const SafetyNoticeCard({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return const NoticeBox(
+      title: '문제가 생기면 연결을 멈춰도 됩니다',
+      copy: '상대의 요청이 부담스럽거나 정보 공유가 불안하다면 확정하지 않고 대화를 중단하는 것이 우선입니다.',
+      success: false,
+    );
+  }
+}
+
 class SettingsPage extends StatelessWidget {
   const SettingsPage({
     required this.role,
@@ -3236,70 +5439,332 @@ class SettingsPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
     return Scaffold(
       appBar: AppBar(
-        backgroundColor: Colors.white,
-        surfaceTintColor: Colors.white,
-        title: const Text(
-          '역할과 알림',
-          style: TextStyle(color: _ink, fontWeight: FontWeight.w900),
+        backgroundColor: colorScheme.surface,
+        surfaceTintColor: colorScheme.surface,
+        title: Text(
+          '설정',
+          style: TextStyle(
+            color: colorScheme.onSurface,
+            fontWeight: FontWeight.w900,
+          ),
         ),
       ),
-      body: ResponsivePage(
-        child: ListView(
-          padding: const EdgeInsets.fromLTRB(20, 18, 20, 28),
+      body: ValueListenableBuilder<AppPreferences>(
+        valueListenable: _appPreferences,
+        builder: (context, preferences, _) {
+          final english = preferences.language == AppLanguagePreference.en;
+
+          return ResponsivePage(
+            child: ListView(
+              padding: const EdgeInsets.fromLTRB(20, 18, 20, 28),
+              children: [
+                PageTitle(
+                  title: english ? 'My settings' : '내 사용 방식',
+                  subtitle: english
+                      ? 'Choose how Poom looks and behaves for you.'
+                      : '역할에 따라 앱에서 강조되는 기능이 달라집니다.',
+                ),
+                DataSourceStatusCard(
+                  usesFirebase: _poomUsesFirebase,
+                  message: _poomRepositoryMessage,
+                ),
+                if (_poomUsesFirebase) const AccountStatusCard(),
+                SectionHeader(
+                  title: english ? 'Theme' : '테마 설정',
+                  action: preferences.theme.label(preferences.language),
+                ),
+                AppCard(
+                  child: Column(
+                    children: [
+                      for (final theme in AppThemePreference.values) ...[
+                        PreferenceOptionTile<AppThemePreference>(
+                          icon: theme == AppThemePreference.light
+                              ? Icons.light_mode_outlined
+                              : Icons.dark_mode_outlined,
+                          label: theme.label(preferences.language),
+                          value: theme,
+                          selectedValue: preferences.theme,
+                          onChanged: _updateThemePreference,
+                        ),
+                        if (theme != AppThemePreference.values.last)
+                          const Divider(color: _line),
+                      ],
+                    ],
+                  ),
+                ),
+                SectionHeader(
+                  title: english ? 'Language' : '언어 설정',
+                  action: preferences.language.label(preferences.language),
+                ),
+                AppCard(
+                  child: Column(
+                    children: [
+                      for (final language in AppLanguagePreference.values) ...[
+                        PreferenceOptionTile<AppLanguagePreference>(
+                          icon: Icons.translate_outlined,
+                          label: language.label(preferences.language),
+                          value: language,
+                          selectedValue: preferences.language,
+                          onChanged: _updateLanguagePreference,
+                        ),
+                        if (language != AppLanguagePreference.values.last)
+                          const Divider(color: _line),
+                      ],
+                    ],
+                  ),
+                ),
+                const ActivitySummaryCard(),
+                AppCard(
+                  child: Column(
+                    children: [
+                      for (final nextRole in AppRole.values)
+                        RoleOptionTile(
+                          role: nextRole,
+                          selected: role == nextRole,
+                          onTap: () => onRoleChanged(nextRole),
+                        ),
+                    ],
+                  ),
+                ),
+                const SectionHeader(title: '알림', action: '앱 내 설정'),
+                AppCard(
+                  child: Column(
+                    children: [
+                      SwitchListTile(
+                        value: matchNotifications,
+                        activeThumbColor: _brand,
+                        onChanged: onMatchNotificationsChanged,
+                        title: const Text(
+                          '매칭 진행 알림',
+                          style: TextStyle(fontWeight: FontWeight.w900),
+                        ),
+                        subtitle: const Text('상대가 매칭을 확정하면 알려줍니다.'),
+                      ),
+                      const Divider(color: _line),
+                      SwitchListTile(
+                        value: chatNotifications,
+                        activeThumbColor: _brand,
+                        onChanged: onChatNotificationsChanged,
+                        title: const Text(
+                          '채팅 메시지 알림',
+                          style: TextStyle(fontWeight: FontWeight.w900),
+                        ),
+                        subtitle: const Text('열린 채팅방의 새 메시지를 알려줍니다.'),
+                      ),
+                    ],
+                  ),
+                ),
+                NoticeBox(
+                  title: _poomUsesFirebase
+                      ? 'Firestore에 저장 중입니다'
+                      : '현재는 임시 데이터로 실행 중입니다',
+                  copy: _poomUsesFirebase
+                      ? '도움 요청, 보호 가능자, 매칭, 채팅, 인계 체크가 Firebase에 저장됩니다.'
+                      : 'Firebase 설정값을 넣어 실행하면 Firestore 저장소로 자동 전환됩니다.',
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
+class PreferenceOptionTile<T> extends StatelessWidget {
+  const PreferenceOptionTile({
+    required this.icon,
+    required this.label,
+    required this.value,
+    required this.selectedValue,
+    required this.onChanged,
+    super.key,
+  });
+
+  final IconData icon;
+  final String label;
+  final T value;
+  final T selectedValue;
+  final ValueChanged<T> onChanged;
+
+  bool get selected => value == selectedValue;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: () => onChanged(value),
+      borderRadius: BorderRadius.circular(14),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 10),
+        child: Row(
           children: [
-            const PageTitle(
-              title: '내 사용 방식',
-              subtitle: '역할에 따라 앱에서 강조되는 기능이 달라집니다.',
+            Container(
+              width: 42,
+              height: 42,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: selected ? _softGreen : _bg,
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: selected ? _brand : _line),
+              ),
+              child: Icon(icon, color: selected ? _brand : _muted),
             ),
-            const ActivitySummaryCard(),
-            AppCard(
-              child: Column(
-                children: [
-                  for (final nextRole in AppRole.values)
-                    RoleOptionTile(
-                      role: nextRole,
-                      selected: role == nextRole,
-                      onTap: () => onRoleChanged(nextRole),
-                    ),
-                ],
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                label,
+                style: TextStyle(
+                  color: selected ? _ink : _muted,
+                  fontSize: 16,
+                  fontWeight: selected ? FontWeight.w900 : FontWeight.w800,
+                ),
               ),
             ),
-            const SectionHeader(title: '알림', action: '앱 내 설정'),
-            AppCard(
-              child: Column(
-                children: [
-                  SwitchListTile(
-                    value: matchNotifications,
-                    activeThumbColor: _brand,
-                    onChanged: onMatchNotificationsChanged,
-                    title: const Text(
-                      '매칭 진행 알림',
-                      style: TextStyle(fontWeight: FontWeight.w900),
-                    ),
-                    subtitle: const Text('상대가 매칭을 확정하면 알려줍니다.'),
-                  ),
-                  const Divider(color: _line),
-                  SwitchListTile(
-                    value: chatNotifications,
-                    activeThumbColor: _brand,
-                    onChanged: onChatNotificationsChanged,
-                    title: const Text(
-                      '채팅 메시지 알림',
-                      style: TextStyle(fontWeight: FontWeight.w900),
-                    ),
-                    subtitle: const Text('열린 채팅방의 새 메시지를 알려줍니다.'),
-                  ),
-                ],
-              ),
-            ),
-            const NoticeBox(
-              title: '현재는 앱 안에서만 저장됩니다',
-              copy: '실제 서비스에서는 계정과 기기에 연결해 설정을 저장할 수 있습니다.',
+            Icon(
+              selected
+                  ? Icons.radio_button_checked
+                  : Icons.radio_button_unchecked,
+              color: selected ? _brand : _muted,
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class DataSourceStatusCard extends StatelessWidget {
+  const DataSourceStatusCard({
+    required this.usesFirebase,
+    required this.message,
+    super.key,
+  });
+
+  final bool usesFirebase;
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    return AppCard(
+      child: Row(
+        children: [
+          Container(
+            width: 44,
+            height: 44,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: usesFirebase ? _softGreen : _notice,
+              borderRadius: BorderRadius.circular(15),
+            ),
+            child: Icon(
+              usesFirebase ? Icons.cloud_done_outlined : Icons.storage_outlined,
+              color: usesFirebase ? _brand : const Color(0xFF9A6A18),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  usesFirebase ? 'Firebase 연결됨' : '임시 저장소 사용 중',
+                  style: const TextStyle(
+                    color: _ink,
+                    fontSize: 16,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  message,
+                  style: const TextStyle(color: _muted, height: 1.35),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class AccountStatusCard extends StatelessWidget {
+  const AccountStatusCard({super.key});
+
+  Future<void> _signOut(BuildContext context) async {
+    await FirebaseAuth.instance.signOut();
+    if (!context.mounted) return;
+    Navigator.of(context).popUntil((route) => route.isFirst);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final user = FirebaseAuth.instance.currentUser;
+    final name = user?.displayName?.trim();
+    final email = user?.email?.trim();
+    final signedIn = user != null;
+
+    return AppCard(
+      child: Row(
+        children: [
+          Container(
+            width: 44,
+            height: 44,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: _softGreen,
+              borderRadius: BorderRadius.circular(15),
+            ),
+            child: Icon(
+              signedIn ? Icons.verified_user_outlined : Icons.person_outline,
+              color: _brand,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  signedIn
+                      ? (name?.isNotEmpty == true ? name! : '로그인한 사용자')
+                      : '둘러보기 중',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: _ink,
+                    fontSize: 16,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  signedIn
+                      ? (email?.isNotEmpty == true
+                          ? email!
+                          : 'OAuth 계정으로 로그인했습니다.')
+                      : 'OAuth 로그인 없이 앱을 살펴보고 있습니다.',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(color: _muted, height: 1.35),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          if (signedIn)
+            TextButton(
+              onPressed: () => _signOut(context),
+              style: TextButton.styleFrom(foregroundColor: _brand),
+              child: const Text(
+                '로그아웃',
+                style: TextStyle(fontWeight: FontWeight.w900),
+              ),
+            ),
+        ],
       ),
     );
   }
@@ -3404,24 +5869,19 @@ class QuickStatusStrip extends StatelessWidget {
           StatusPill(
             title: '상호 대기',
             value: '${stats.waitingMatches}',
+            compact: compact,
           ),
           StatusPill(
             title: '매칭 검토',
             value: '${stats.reviewingMatches}',
+            compact: compact,
           ),
           StatusPill(
             title: '인계 준비',
             value: '${stats.handoffsReady}',
+            compact: compact,
           ),
         ];
-
-        if (compact) {
-          return Column(
-            children: [
-              for (final pill in pills) pill,
-            ],
-          );
-        }
 
         return Row(
           children: [
@@ -3531,15 +5991,25 @@ class SafetyRuleRow extends StatelessWidget {
 }
 
 class StatusPill extends StatelessWidget {
-  const StatusPill({required this.title, required this.value, super.key});
+  const StatusPill({
+    required this.title,
+    required this.value,
+    this.compact = false,
+    super.key,
+  });
 
   final String title;
   final String value;
+  final bool compact;
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.all(14),
+      constraints: const BoxConstraints(minHeight: 74),
+      padding: EdgeInsets.symmetric(
+        horizontal: compact ? 8 : 14,
+        vertical: compact ? 11 : 14,
+      ),
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(18),
@@ -3550,18 +6020,22 @@ class StatusPill extends StatelessWidget {
         children: [
           Text(
             value,
-            style: const TextStyle(
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
               color: _ink,
-              fontSize: 22,
+              fontSize: compact ? 20 : 22,
               fontWeight: FontWeight.w900,
             ),
           ),
           const SizedBox(height: 2),
           Text(
             title,
-            style: const TextStyle(
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
               color: _muted,
-              fontSize: 12,
+              fontSize: compact ? 11 : 12,
               fontWeight: FontWeight.w800,
             ),
           ),
@@ -4118,10 +6592,14 @@ class ChatBubble extends StatelessWidget {
 }
 
 class ChatInputBar extends StatelessWidget {
-  ChatInputBar({required this.onSend, super.key});
+  const ChatInputBar({
+    required this.controller,
+    required this.onSend,
+    super.key,
+  });
 
+  final TextEditingController controller;
   final ValueChanged<String> onSend;
-  final TextEditingController _controller = TextEditingController();
 
   @override
   Widget build(BuildContext context) {
@@ -4135,10 +6613,10 @@ class ChatInputBar extends StatelessWidget {
         children: [
           Expanded(
             child: TextField(
-              controller: _controller,
+              controller: controller,
               onSubmitted: (value) {
                 onSend(value);
-                _controller.clear();
+                controller.clear();
               },
               decoration: InputDecoration(
                 hintText: '인계 시간이나 정보를 입력해 주세요',
@@ -4158,8 +6636,8 @@ class ChatInputBar extends StatelessWidget {
           const SizedBox(width: 8),
           IconButton.filled(
             onPressed: () {
-              onSend(_controller.text);
-              _controller.clear();
+              onSend(controller.text);
+              controller.clear();
             },
             style: IconButton.styleFrom(backgroundColor: _brand),
             icon: const Icon(Icons.send),

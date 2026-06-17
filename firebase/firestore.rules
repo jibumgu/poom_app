@@ -1,0 +1,33 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function prototypeAccess() {
+      return true;
+    }
+
+    match /dashboard/{document} {
+      allow read, write: if prototypeAccess();
+    }
+
+    match /care_requests/{document} {
+      allow read, write: if prototypeAccess();
+    }
+
+    match /caregivers/{document} {
+      allow read, write: if prototypeAccess();
+    }
+
+    match /matches/{document} {
+      allow read, write: if prototypeAccess();
+    }
+
+    match /chat_messages/{document} {
+      allow read, write: if prototypeAccess();
+    }
+
+    match /handoff_tasks/{document} {
+      allow read, write: if prototypeAccess();
+    }
+  }
+}

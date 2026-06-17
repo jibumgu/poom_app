@@ -240,6 +240,79 @@ flutter build web
 
 빌드 결과물은 `build/web` 폴더에 생성됩니다.
 
+## Firebase 연동
+
+앱은 기본적으로 임시 데이터베이스로 실행되지만, Firebase 설정값을 전달하면 Firestore 저장소로 자동 전환됩니다.
+
+Firebase Console에서 웹 앱을 만든 뒤 아래 값들을 확인합니다.
+
+- `apiKey`
+- `appId`
+- `messagingSenderId`
+- `projectId`
+- `authDomain`
+- `storageBucket`
+- `measurementId`
+
+크롬에서 Firebase로 실행:
+
+```bash
+flutter run -d chrome --web-port 5174 \
+  --dart-define=FIREBASE_API_KEY=your-api-key \
+  --dart-define=FIREBASE_APP_ID=your-app-id \
+  --dart-define=FIREBASE_MESSAGING_SENDER_ID=your-sender-id \
+  --dart-define=FIREBASE_PROJECT_ID=your-project-id \
+  --dart-define=FIREBASE_AUTH_DOMAIN=your-project.firebaseapp.com \
+  --dart-define=FIREBASE_STORAGE_BUCKET=your-project.appspot.com \
+  --dart-define=FIREBASE_MEASUREMENT_ID=your-measurement-id
+```
+
+웹 배포용 빌드도 같은 방식으로 설정값을 전달합니다.
+
+```bash
+flutter build web --base-href /poom_app/ \
+  --dart-define=FIREBASE_API_KEY=your-api-key \
+  --dart-define=FIREBASE_APP_ID=your-app-id \
+  --dart-define=FIREBASE_MESSAGING_SENDER_ID=your-sender-id \
+  --dart-define=FIREBASE_PROJECT_ID=your-project-id \
+  --dart-define=FIREBASE_AUTH_DOMAIN=your-project.firebaseapp.com \
+  --dart-define=FIREBASE_STORAGE_BUCKET=your-project.appspot.com \
+  --dart-define=FIREBASE_MEASUREMENT_ID=your-measurement-id
+```
+
+Firestore 컬렉션 구조:
+
+- `dashboard/current`
+- `care_requests`
+- `caregivers`
+- `matches`
+- `chat_messages`
+- `handoff_tasks`
+
+처음 연결한 Firestore가 비어 있으면 앱이 프로토타입 seed 데이터를 자동으로 생성합니다.
+
+### OAuth 로그인/회원가입
+
+Firebase 설정값이 있으면 앱 시작 후 OAuth 로그인/회원가입 페이지가 먼저 표시됩니다. OAuth는 같은 버튼에서 처리됩니다. 처음 들어온 계정이면 회원가입이 되고, 이미 가입한 계정이면 로그인됩니다.
+
+현재 제공자:
+
+- Google
+- Apple
+
+Firebase Console에서 다음 설정이 필요합니다.
+
+1. Authentication 메뉴로 이동합니다.
+2. Sign-in method에서 Google 제공자를 활성화합니다.
+3. Apple 로그인을 사용하려면 Apple Developer 계정의 Service ID, Team ID, Key ID, Private Key를 Firebase Auth에 연결합니다.
+4. 웹 실행 주소를 Authorized domains에 추가합니다.
+   - 로컬 개발: `localhost`, `127.0.0.1`
+   - 배포 후: GitHub Pages 도메인
+
+Firebase 설정값이 없거나 연결에 실패하면 OAuth 버튼은 비활성화되고, `지금은 둘러보기`로 임시 데이터 기반 앱을 확인할 수 있습니다.
+
+프로토타입 규칙은 [firebase/firestore.rules](firebase/firestore.rules)에 있습니다. 현재는 Firebase 연결 검증을 위해 읽기/쓰기를 열어둔 상태이므로, 실제 배포 전에는 Firebase Auth를 붙이고 사용자별 권한 규칙으로 반드시 강화해야 합니다.
+
 ## 테스트
 
 정적 분석:
@@ -267,15 +340,7 @@ flutter test
 
 ## 현재 한계
 
-현재 데이터는 앱 내부 메모리 기반 임시 데이터입니다.
-
-따라서 앱을 새로 실행하면 초기 데이터로 돌아갑니다. 실제 서비스로 발전시키려면 다음 중 하나의 백엔드 저장소를 연결해야 합니다.
-
-- Firebase Firestore
-- Supabase
-- REST API 서버
-- GraphQL API 서버
-- 자체 데이터베이스 서버
+Firebase Firestore 연결 구조는 추가되었지만, 아직 사용자 인증과 사용자별 권한 분리는 들어가지 않았습니다. Firebase 설정값 없이 실행하면 기존처럼 앱 내부 메모리 기반 임시 데이터로 돌아갑니다.
 
 ## 다음 단계 아이디어
 

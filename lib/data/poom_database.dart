@@ -397,11 +397,49 @@ class PoomDatabase {
   final List<HandoffTask> handoffTasks;
 }
 
-class PoomRepository {
+abstract class PoomRepositoryApi {
+  Future<HomeFeed> fetchHomeFeed();
+  Future<CareRequest> fetchMainRequest();
+  Future<CaregiverProfile> fetchMainCaregiver();
+  Future<List<ChatMessageRecord>> fetchChatMessages(String matchId);
+  Future<List<HandoffTask>> fetchHandoffTasks();
+  Future<DashboardStats> readDashboardStats();
+  Future<DashboardStats> createDashboardStats(DashboardStats stats);
+  Future<DashboardStats> updateDashboardStats(DashboardStats stats);
+  Future<void> deleteDashboardStats();
+  Future<List<CareRequest>> readCareRequests();
+  Future<CareRequest?> readCareRequest(String id);
+  Future<CareRequest> createCareRequest(CareRequest request);
+  Future<CareRequest> updateCareRequest(CareRequest request);
+  Future<void> deleteCareRequest(String id);
+  Future<List<CaregiverProfile>> readCaregivers();
+  Future<CaregiverProfile?> readCaregiver(String id);
+  Future<CaregiverProfile> createCaregiver(CaregiverProfile caregiver);
+  Future<CaregiverProfile> updateCaregiver(CaregiverProfile caregiver);
+  Future<void> deleteCaregiver(String id);
+  Future<List<MatchRecord>> readMatches();
+  Future<MatchRecord?> readMatch(String id);
+  Future<MatchRecord> createMatch(MatchRecord match);
+  Future<MatchRecord> updateMatch(MatchRecord match);
+  Future<void> deleteMatch(String id);
+  Future<List<ChatMessageRecord>> readChatMessages(String matchId);
+  Future<ChatMessageRecord?> readChatMessage(String id);
+  Future<ChatMessageRecord> createChatMessage(ChatMessageRecord message);
+  Future<ChatMessageRecord> updateChatMessage(ChatMessageRecord message);
+  Future<void> deleteChatMessage(String id);
+  Future<List<HandoffTask>> readHandoffTasks();
+  Future<HandoffTask?> readHandoffTask(String id);
+  Future<HandoffTask> createHandoffTask(HandoffTask task);
+  Future<HandoffTask> updateHandoffTask(HandoffTask task);
+  Future<void> deleteHandoffTask(String id);
+}
+
+class PoomRepository implements PoomRepositoryApi {
   const PoomRepository(this._database);
 
   final PoomDatabase _database;
 
+  @override
   Future<HomeFeed> fetchHomeFeed() async {
     await Future<void>.delayed(const Duration(milliseconds: 180));
     return HomeFeed(
@@ -411,16 +449,19 @@ class PoomRepository {
     );
   }
 
+  @override
   Future<CareRequest> fetchMainRequest() async {
     await Future<void>.delayed(const Duration(milliseconds: 120));
     return _database.requests.first;
   }
 
+  @override
   Future<CaregiverProfile> fetchMainCaregiver() async {
     await Future<void>.delayed(const Duration(milliseconds: 120));
     return _database.caregivers.first;
   }
 
+  @override
   Future<List<ChatMessageRecord>> fetchChatMessages(String matchId) async {
     await Future<void>.delayed(const Duration(milliseconds: 120));
     return _database.chatMessages
@@ -428,28 +469,33 @@ class PoomRepository {
         .toList(growable: false);
   }
 
+  @override
   Future<List<HandoffTask>> fetchHandoffTasks() async {
     await Future<void>.delayed(const Duration(milliseconds: 120));
     return List.unmodifiable(_database.handoffTasks);
   }
 
+  @override
   Future<DashboardStats> readDashboardStats() async {
     await _simulateLatency();
     return _database.stats;
   }
 
+  @override
   Future<DashboardStats> createDashboardStats(DashboardStats stats) async {
     await _simulateLatency();
     _database.stats = stats;
     return _database.stats;
   }
 
+  @override
   Future<DashboardStats> updateDashboardStats(DashboardStats stats) async {
     await _simulateLatency();
     _database.stats = stats;
     return _database.stats;
   }
 
+  @override
   Future<void> deleteDashboardStats() async {
     await _simulateLatency();
     _database.stats = const DashboardStats(
@@ -459,16 +505,19 @@ class PoomRepository {
     );
   }
 
+  @override
   Future<List<CareRequest>> readCareRequests() async {
     await _simulateLatency();
     return List.unmodifiable(_database.requests);
   }
 
+  @override
   Future<CareRequest?> readCareRequest(String id) async {
     await _simulateLatency();
     return _findById(_database.requests, id, (request) => request.id);
   }
 
+  @override
   Future<CareRequest> createCareRequest(CareRequest request) async {
     await _simulateLatency();
     _ensureUniqueId(_database.requests, request.id, (item) => item.id);
@@ -476,28 +525,33 @@ class PoomRepository {
     return request;
   }
 
+  @override
   Future<CareRequest> updateCareRequest(CareRequest request) async {
     await _simulateLatency();
     _replaceById(_database.requests, request, request.id, (item) => item.id);
     return request;
   }
 
+  @override
   Future<void> deleteCareRequest(String id) async {
     await _simulateLatency();
     _deleteById(_database.requests, id, (item) => item.id);
     _database.matches.removeWhere((match) => match.requestId == id);
   }
 
+  @override
   Future<List<CaregiverProfile>> readCaregivers() async {
     await _simulateLatency();
     return List.unmodifiable(_database.caregivers);
   }
 
+  @override
   Future<CaregiverProfile?> readCaregiver(String id) async {
     await _simulateLatency();
     return _findById(_database.caregivers, id, (caregiver) => caregiver.id);
   }
 
+  @override
   Future<CaregiverProfile> createCaregiver(CaregiverProfile caregiver) async {
     await _simulateLatency();
     _ensureUniqueId(_database.caregivers, caregiver.id, (item) => item.id);
@@ -505,6 +559,7 @@ class PoomRepository {
     return caregiver;
   }
 
+  @override
   Future<CaregiverProfile> updateCaregiver(CaregiverProfile caregiver) async {
     await _simulateLatency();
     _replaceById(
@@ -516,22 +571,26 @@ class PoomRepository {
     return caregiver;
   }
 
+  @override
   Future<void> deleteCaregiver(String id) async {
     await _simulateLatency();
     _deleteById(_database.caregivers, id, (item) => item.id);
     _database.matches.removeWhere((match) => match.caregiverId == id);
   }
 
+  @override
   Future<List<MatchRecord>> readMatches() async {
     await _simulateLatency();
     return List.unmodifiable(_database.matches);
   }
 
+  @override
   Future<MatchRecord?> readMatch(String id) async {
     await _simulateLatency();
     return _findById(_database.matches, id, (match) => match.id);
   }
 
+  @override
   Future<MatchRecord> createMatch(MatchRecord match) async {
     await _simulateLatency();
     _ensureUniqueId(_database.matches, match.id, (item) => item.id);
@@ -541,6 +600,7 @@ class PoomRepository {
     return match;
   }
 
+  @override
   Future<MatchRecord> updateMatch(MatchRecord match) async {
     await _simulateLatency();
     _requireExists(_database.requests, match.requestId, (item) => item.id);
@@ -549,12 +609,14 @@ class PoomRepository {
     return match;
   }
 
+  @override
   Future<void> deleteMatch(String id) async {
     await _simulateLatency();
     _deleteById(_database.matches, id, (item) => item.id);
     _database.chatMessages.removeWhere((message) => message.matchId == id);
   }
 
+  @override
   Future<List<ChatMessageRecord>> readChatMessages(String matchId) async {
     await _simulateLatency();
     return _database.chatMessages
@@ -562,11 +624,13 @@ class PoomRepository {
         .toList(growable: false);
   }
 
+  @override
   Future<ChatMessageRecord?> readChatMessage(String id) async {
     await _simulateLatency();
     return _findById(_database.chatMessages, id, (message) => message.id);
   }
 
+  @override
   Future<ChatMessageRecord> createChatMessage(
     ChatMessageRecord message,
   ) async {
@@ -577,30 +641,36 @@ class PoomRepository {
     return message;
   }
 
+  @override
   Future<ChatMessageRecord> updateChatMessage(
     ChatMessageRecord message,
   ) async {
     await _simulateLatency();
     _requireExists(_database.matches, message.matchId, (item) => item.id);
-    _replaceById(_database.chatMessages, message, message.id, (item) => item.id);
+    _replaceById(
+        _database.chatMessages, message, message.id, (item) => item.id);
     return message;
   }
 
+  @override
   Future<void> deleteChatMessage(String id) async {
     await _simulateLatency();
     _deleteById(_database.chatMessages, id, (item) => item.id);
   }
 
+  @override
   Future<List<HandoffTask>> readHandoffTasks() async {
     await _simulateLatency();
     return List.unmodifiable(_database.handoffTasks);
   }
 
+  @override
   Future<HandoffTask?> readHandoffTask(String id) async {
     await _simulateLatency();
     return _findById(_database.handoffTasks, id, (task) => task.id);
   }
 
+  @override
   Future<HandoffTask> createHandoffTask(HandoffTask task) async {
     await _simulateLatency();
     _ensureUniqueId(_database.handoffTasks, task.id, (item) => item.id);
@@ -608,12 +678,14 @@ class PoomRepository {
     return task;
   }
 
+  @override
   Future<HandoffTask> updateHandoffTask(HandoffTask task) async {
     await _simulateLatency();
     _replaceById(_database.handoffTasks, task, task.id, (item) => item.id);
     return task;
   }
 
+  @override
   Future<void> deleteHandoffTask(String id) async {
     await _simulateLatency();
     _deleteById(_database.handoffTasks, id, (item) => item.id);
